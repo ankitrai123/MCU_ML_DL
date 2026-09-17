@@ -10,6 +10,71 @@ This is Phase 1: the conversion engine (library + CLI) for native/bare-metal
 microcontroller targets. A web front end, an Arduino CLI backend, and an FPGA
 backend are later phases — see [Roadmap](#roadmap).
 
+## Getting started — the easy way (no coding experience needed)
+
+This uses the point-and-click web page, not the command-line tool. You'll
+need a trained model file someone gave you (a `.pkl`, `.h5`, `.keras`, or
+`.onnx` file — this tool doesn't train models itself, it converts an
+already-trained one). Five steps, all one-time except the last:
+
+**1. Install Python** (skip if you already have it). Go to
+[python.org/downloads](https://www.python.org/downloads/) and download the
+installer for your system.
+- **Windows:** run the installer, and **check the box that says "Add
+  python.exe to PATH"** on the very first screen before clicking Install —
+  this is the single most common thing people miss.
+- **Mac:** run the installer normally. On Mac, use `python3` and `pip3`
+  (not `python`/`pip`) in the commands below.
+
+**2. Get the project files onto your computer.** If you were given a link
+to this repository, open it in a browser, click the green **Code** button,
+then **Download ZIP**, and unzip it somewhere you'll remember (like your
+Desktop). You should end up with a folder containing a file named
+`README.md` (this file) and a folder named `edgeforge`.
+
+**3. Open a terminal in that folder.**
+- **Windows:** open the folder in File Explorer, click once in the address
+  bar at the top (where the folder path is shown), type `cmd`, and press
+  Enter. A black window opens — that's your terminal, already pointed at
+  the right folder.
+- **Mac:** open the folder in Finder, right-click inside it, and choose
+  **New Terminal at Folder** (or open the Terminal app and type `cd ` then
+  drag the folder into the window and press Enter).
+
+**4. Type these two commands, pressing Enter after each one** (the first
+one takes a minute or two and prints a lot of text — that's normal):
+
+```
+pip install -r requirements.txt
+python -m edgeforge serve
+```
+
+Leave that window open — it's now running a small local web server just
+for you, on your own computer. (Mac: use `pip3` instead of `pip` if the
+first command says "command not found".)
+
+**5. Open your web browser** and go to `http://127.0.0.1:5000`. Choose
+your model file, pick a board from the dropdown (**if you're not sure which
+one, pick `stm32f411`** — it accepts the widest range of models), and click
+**Convert**. A green **SUCCESS** badge means it worked; the page lists the
+files it generated with a download link next to each, plus a "Download all
+as .zip" button.
+
+You do **not** need to install anything else to get useful, correct C code
+out of this — that's all steps 1–5 above. Installing a compiler (see
+[Toolchain setup](#toolchain-setup) below) is only needed for two *extra*
+things: getting a ready-to-flash firmware file instead of just source code,
+and having the tool double-check its output against your original model
+before you trust it. If you skip that, the results page will say so plainly
+instead of failing.
+
+When you're done, go back to the terminal window from step 4 and press
+`Ctrl+C` to stop the server.
+
+*Prefer the command line, or setting this up for a team/CI? See
+[Quick start](#quick-start) below — it's the same tool, run without the
+web page.*
+
 ## Why this exists, in one sentence
 
 The same generator code produces correct C for a 512KB-flash/128KB-RAM

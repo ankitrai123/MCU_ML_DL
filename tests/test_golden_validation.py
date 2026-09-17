@@ -2,7 +2,7 @@ import pytest
 
 from edgeforge.boards.registry import BoardRegistry
 from edgeforge.codegen.generator import generate
-from edgeforge.errors import ValidationError
+from edgeforge.errors import ToolchainNotFoundError
 from edgeforge.ingest import sklearn_ingest
 from edgeforge.validate.golden import run_golden_validation
 
@@ -67,5 +67,5 @@ def test_missing_host_compiler_raises_clear_message(tree_clf_path, boards_dir, t
     gen = generate(result.ir, board, tmp_path)
 
     monkeypatch.setattr("shutil.which", lambda _: None)
-    with pytest.raises(ValidationError, match="host C compiler"):
+    with pytest.raises(ToolchainNotFoundError, match="host C compiler"):
         run_golden_validation(result, board, gen.model_c, tmp_path, n_samples=5)

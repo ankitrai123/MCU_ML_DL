@@ -20,6 +20,9 @@
       <span class="badge bad">failed</span>
     {% endif %}
   </h2>
+  {% if result.ok and result.validate_skipped_reason %}
+  <p class="board-hint">C source was generated, but couldn't be double-checked against your original model on this computer (see "Golden-vector validation" below) &mdash; it's likely still correct, just not verified here.</p>
+  {% endif %}
 
   {% if result.ingest_result %}
   <div class="stage">
@@ -72,6 +75,11 @@
       <span class="badge {{ 'ok' if result.golden.all_passed else 'bad' }}">{{ result.golden.n_pass }}/{{ result.golden.n_total }} matched</span>
     </h3>
     <pre>{{ result.golden.describe() }}</pre>
+  </div>
+  {% elif result.validate_skipped_reason %}
+  <div class="stage">
+    <h3>Golden-vector validation <span class="badge warn">skipped</span></h3>
+    <pre>{{ result.validate_skipped_reason }}</pre>
   </div>
   {% endif %}
 

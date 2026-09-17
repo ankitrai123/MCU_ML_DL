@@ -152,13 +152,17 @@ def cmd_convert(args: argparse.Namespace) -> int:
     if result.golden:
         print(f"\n== golden-vector validation ({args.samples} samples) ==")
         print(result.golden.describe())
+    elif result.validate_skipped_reason:
+        print("\n== golden-vector validation: skipped ==")
+        print(result.validate_skipped_reason)
     if result.error and result.error_stage == "validate":
         print(f"error: {result.error}", file=sys.stderr)
         return 1
 
     print()
     if result.ok:
-        print("convert: SUCCESS")
+        note = " (source generated; install a host C compiler to also verify it -- see the message above)" if result.validate_skipped_reason else ""
+        print(f"convert: SUCCESS{note}")
         return 0
     build_bad = result.build and not result.build.success and not result.build.toolchain_missing
     validate_bad = result.golden and not result.golden.all_passed

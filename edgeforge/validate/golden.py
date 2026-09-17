@@ -21,7 +21,7 @@ from edgeforge.boards.schema import BoardProfile
 from edgeforge.build.toolchain import build_host_executable
 from edgeforge.codegen.context import build_context, make_env
 from edgeforge.codegen.formatting import float_literal
-from edgeforge.errors import ValidationError
+from edgeforge.errors import ToolchainNotFoundError, ValidationError
 from edgeforge.ingest.base import IngestResult
 from edgeforge.ir import ModelIR
 
@@ -96,7 +96,12 @@ def run_golden_validation(
     build_res = build_host_executable([model_c_path, golden_c_path], out_dir, board, exe_name="golden_test")
     if not build_res.success:
         if build_res.toolchain_missing:
-            raise ValidationError(
+            # Distinct from ValidationError: this isn't the model's fault, it's a missing
+            # local tool, exactly like a missing target-board toolchain -- callers (pipeline.py)
+            # treat it as a skippable, non-fatal "can't check this on this machine yet" outcome
+            # rather than a failure, so a first-time user without any compiler installed still
+            # gets their generated C instead of a scary error.
+            raise ToolchainNotFoundError(
                 f"golden-vector validation needs a host C compiler ('{build_res.toolchain_missing}'), which isn't "
                 "installed (or not on PATH) on this machine. This is separate from a target board's cross-compiler "
                 "(arm-none-eabi-gcc/sdcc) -- validation always runs on the host, regardless of target board. "
