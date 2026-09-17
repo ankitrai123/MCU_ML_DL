@@ -1,0 +1,226 @@
+{# Op macros: one per IR op, shared verbatim by every board. Behavioral differences
+   between boards come entirely from `board.type_of(...)` and qualifier lookups --
+   nothing here branches on board.id or board.architecture. Branching on a *tensor's*
+   dtype (float32 classical vs int8 quantized) is a data-kind branch, not a board branch:
+   the same board can render either path depending on which model it's given. #}
+
+{% macro emit_tree(node, ir, board, index_ctype) %}
+{% set feat = ir.tensors[node.attrs.feature] %}
+{% set thr = ir.tensors[node.attrs.threshold] %}
+{% set left = ir.tensors[node.attrs.left] %}
+{% set right = ir.tensors[node.attrs.right] %}
+{% set leaf = ir.tensors[node.attrs.leaf_value] %}
+{% set in_t = ir.tensors[node.inputs[0]] %}
+{% set out_t = ir.tensors[node.outputs[0]] %}
+    {
+        {{ index_ctype }} ef_node_idx = 0;
+        while ({{ buf_name(feat.name) }}[ef_node_idx] >= 0) {
+            if ({{ tensor_ref(in_t, ir) }}[{{ buf_name(feat.name) }}[ef_node_idx]] <= {{ buf_name(thr.name) }}[ef_node_idx]) {
+                ef_node_idx = ({{ index_ctype }}){{ buf_name(left.name) }}[ef_node_idx];
+            } else {
+                ef_node_idx = ({{ index_ctype }}){{ buf_name(right.name) }}[ef_node_idx];
+            }
+        }
+{% if node.attrs.is_classifier %}
+        {
+            {{ index_ctype }} ef_k;
+            {{ index_ctype }} ef_predicted = ({{ index_ctype }})({{ buf_name(leaf.name) }}[ef_node_idx] + 0.5f);
+            for (ef_k = 0; ef_k < {{ int_literal(node.attrs.out_size) }}; ef_k++) {
+                {{ tensor_ref(out_t, ir) }}[ef_k] = (ef_k == ef_predicted) ? 1.0f : 0.0f;
+            }
+        }
+{% else %}
+        {{ tensor_ref(out_t, ir) }}[0] = {{ buf_name(leaf.name) }}[ef_node_idx];
+{% endif %}
+    }
+{% endmacro %}
+
+{% macro emit_linear(node, ir, board, index_ctype) %}
+{% set w = ir.tensors[node.attrs.weight] %}
+{% set b = ir.tensors[node.attrs.bias] if node.attrs.bias else none %}
+{% set in_t = ir.tensors[node.inputs[0]] %}
+{% set out_t = ir.tensors[node.outputs[0]] %}
+{% set n_out = w.shape[0] %}
+{% set n_in = w.shape[1] %}
+    {
+        {{ index_ctype }} ef_i, ef_j;
+{% if w.dtype == 'float32' %}
+        for (ef_i = 0; ef_i < {{ n_out }}; ef_i++) {
+            {{ board.type_of('classical_accum') }} ef_acc = {% if b %}{{ buf_name(b.name) }}[ef_i]{% else %}0.0f{% endif %};
+            for (ef_j = 0; ef_j < {{ n_in }}; ef_j++) {
+                ef_acc += {{ buf_name(w.name) }}[ef_i][ef_j] * {{ flat_ref(in_t, ir, board.type_of('real')) }}[ef_j];
+            }
+            {{ tensor_ref(out_t, ir) }}[ef_i] = ef_acc;
+        }
+{% else %}
+{% set mult = requant_multipliers(node, ir) %}
+{% set qmin, qmax = fused_activation_bounds(node, ir) %}
+{% set in_zp = in_t.zero_point[0] %}
+{% set out_zp = out_t.zero_point[0] %}
+{% set in_elem_ctype = board_ctype_for(in_t, board) %}
+        static const {{ board.type_of('real') }} ef_{{ node.name }}_mult[{{ n_out }}] = {{ c_array_literal(mult, 'float32') }};
+        for (ef_i = 0; ef_i < {{ n_out }}; ef_i++) {
+            {{ board.type_of('quant_accum') }} ef_acc = {% if b %}{{ buf_name(b.name) }}[ef_i]{% else %}0{% endif %};
+            for (ef_j = 0; ef_j < {{ n_in }}; ef_j++) {
+                ef_acc += (({{ board.type_of('quant_accum') }}){{ flat_ref(in_t, ir, in_elem_ctype) }}[ef_j] - {{ int_literal(in_zp) }})
+                         * (({{ board.type_of('quant_accum') }}){{ buf_name(w.name) }}[ef_i][ef_j]);
+            }
+            {
+                {{ board.type_of('real') }} ef_scaled = (({{ board.type_of('real') }})ef_acc) * ef_{{ node.name }}_mult[ef_i] + {{ float_literal(out_zp) }};
+                {{ tensor_ref(out_t, ir) }}[ef_i] = ef_quantize_clamp(ef_scaled, {{ qmin }}, {{ qmax }});
+            }
+        }
+{% endif %}
+    }
+{% endmacro %}
+
+{% macro emit_conv2d(node, ir, board, index_ctype) %}
+{% set w = ir.tensors[node.attrs.weight] %}
+{% set b = ir.tensors[node.attrs.bias] if node.attrs.bias else none %}
+{% set in_t = ir.tensors[node.inputs[0]] %}
+{% set out_t = ir.tensors[node.outputs[0]] %}
+{% set mult = requant_multipliers(node, ir) %}
+{% set qmin, qmax = fused_activation_bounds(node, ir) %}
+{% set in_zp = in_t.zero_point[0] %}
+{% set out_zp = out_t.zero_point[0] %}
+{% set a = node.attrs %}
+    {
+        static const {{ board.type_of('real') }} ef_{{ node.name }}_mult[{{ a.out_c }}] = {{ c_array_literal(mult, 'float32') }};
+        {{ index_ctype }} ef_oh, ef_ow, ef_oc, ef_kh, ef_kw, ef_ic;
+        for (ef_oc = 0; ef_oc < {{ a.out_c }}; ef_oc++) {
+            for (ef_oh = 0; ef_oh < {{ a.out_h }}; ef_oh++) {
+                for (ef_ow = 0; ef_ow < {{ a.out_w }}; ef_ow++) {
+                    {{ board.type_of('quant_accum') }} ef_acc = {% if b %}{{ buf_name(b.name) }}[ef_oc]{% else %}0{% endif %};
+                    for (ef_kh = 0; ef_kh < {{ a.filter_h }}; ef_kh++) {
+                        {{ index_ctype }} ef_ih = (({{ index_ctype }})(ef_oh * {{ a.stride_h }} + ef_kh)) - {{ a.pad_top }};
+                        if (ef_ih >= (({{ index_ctype }}){{ a.in_h }})) continue; /* also catches unsigned wraparound from a negative offset */
+                        for (ef_kw = 0; ef_kw < {{ a.filter_w }}; ef_kw++) {
+                            {{ index_ctype }} ef_iw = (({{ index_ctype }})(ef_ow * {{ a.stride_w }} + ef_kw)) - {{ a.pad_left }};
+                            if (ef_iw >= (({{ index_ctype }}){{ a.in_w }})) continue;
+                            for (ef_ic = 0; ef_ic < {{ a.in_c }}; ef_ic++) {
+                                ef_acc += (({{ board.type_of('quant_accum') }}){{ tensor_ref(in_t, ir) }}[ef_ih][ef_iw][ef_ic] - {{ int_literal(in_zp) }})
+                                         * (({{ board.type_of('quant_accum') }}){{ buf_name(w.name) }}[ef_oc][ef_kh][ef_kw][ef_ic]);
+                            }
+                        }
+                    }
+                    {
+                        {{ board.type_of('real') }} ef_scaled = (({{ board.type_of('real') }})ef_acc) * ef_{{ node.name }}_mult[ef_oc] + {{ float_literal(out_zp) }};
+                        {{ tensor_ref(out_t, ir) }}[ef_oh][ef_ow][ef_oc] = ef_quantize_clamp(ef_scaled, {{ qmin }}, {{ qmax }});
+                    }
+                }
+            }
+        }
+    }
+{% endmacro %}
+
+{% macro emit_depthwise_conv2d(node, ir, board, index_ctype) %}
+{% set w = ir.tensors[node.attrs.weight] %}
+{% set b = ir.tensors[node.attrs.bias] if node.attrs.bias else none %}
+{% set in_t = ir.tensors[node.inputs[0]] %}
+{% set out_t = ir.tensors[node.outputs[0]] %}
+{% set mult = requant_multipliers(node, ir) %}
+{% set qmin, qmax = fused_activation_bounds(node, ir) %}
+{% set in_zp = in_t.zero_point[0] %}
+{% set out_zp = out_t.zero_point[0] %}
+{% set a = node.attrs %}
+    {
+        static const {{ board.type_of('real') }} ef_{{ node.name }}_mult[{{ a.out_c }}] = {{ c_array_literal(mult, 'float32') }};
+        {{ index_ctype }} ef_oh, ef_ow, ef_oc, ef_kh, ef_kw, ef_ic;
+        for (ef_oc = 0; ef_oc < {{ a.out_c }}; ef_oc++) {
+            ef_ic = ef_oc / {{ int_literal(a.depth_multiplier) }};
+            for (ef_oh = 0; ef_oh < {{ a.out_h }}; ef_oh++) {
+                for (ef_ow = 0; ef_ow < {{ a.out_w }}; ef_ow++) {
+                    {{ board.type_of('quant_accum') }} ef_acc = {% if b %}{{ buf_name(b.name) }}[ef_oc]{% else %}0{% endif %};
+                    for (ef_kh = 0; ef_kh < {{ a.filter_h }}; ef_kh++) {
+                        {{ index_ctype }} ef_ih = (({{ index_ctype }})(ef_oh * {{ a.stride_h }} + ef_kh)) - {{ a.pad_top }};
+                        if (ef_ih >= (({{ index_ctype }}){{ a.in_h }})) continue;
+                        for (ef_kw = 0; ef_kw < {{ a.filter_w }}; ef_kw++) {
+                            {{ index_ctype }} ef_iw = (({{ index_ctype }})(ef_ow * {{ a.stride_w }} + ef_kw)) - {{ a.pad_left }};
+                            if (ef_iw >= (({{ index_ctype }}){{ a.in_w }})) continue;
+                            ef_acc += (({{ board.type_of('quant_accum') }}){{ tensor_ref(in_t, ir) }}[ef_ih][ef_iw][ef_ic] - {{ int_literal(in_zp) }})
+                                     * (({{ board.type_of('quant_accum') }}){{ buf_name(w.name) }}[0][ef_kh][ef_kw][ef_oc]);
+                        }
+                    }
+                    {
+                        {{ board.type_of('real') }} ef_scaled = (({{ board.type_of('real') }})ef_acc) * ef_{{ node.name }}_mult[ef_oc] + {{ float_literal(out_zp) }};
+                        {{ tensor_ref(out_t, ir) }}[ef_oh][ef_ow][ef_oc] = ef_quantize_clamp(ef_scaled, {{ qmin }}, {{ qmax }});
+                    }
+                }
+            }
+        }
+    }
+{% endmacro %}
+
+{% macro emit_pool2d(node, ir, board, index_ctype) %}
+{% set in_t = ir.tensors[node.inputs[0]] %}
+{% set out_t = ir.tensors[node.outputs[0]] %}
+{% set a = node.attrs %}
+    {
+        {{ index_ctype }} ef_oh, ef_ow, ef_oc, ef_kh, ef_kw;
+        for (ef_oc = 0; ef_oc < {{ a.out_c }}; ef_oc++) {
+            for (ef_oh = 0; ef_oh < {{ a.out_h }}; ef_oh++) {
+                for (ef_ow = 0; ef_ow < {{ a.out_w }}; ef_ow++) {
+{% if a.reduce == 'max' %}
+                    {{ board.type_of('activation_i8') }} ef_best = -128;
+{% else %}
+                    {{ board.type_of('quant_accum') }} ef_sum = 0;
+                    {{ index_ctype }} ef_count = 0;
+{% endif %}
+                    for (ef_kh = 0; ef_kh < {{ a.filter_h }}; ef_kh++) {
+                        {{ index_ctype }} ef_ih = (({{ index_ctype }})(ef_oh * {{ a.stride_h }} + ef_kh)) - {{ a.pad_top }};
+                        if (ef_ih >= (({{ index_ctype }}){{ a.in_h }})) continue;
+                        for (ef_kw = 0; ef_kw < {{ a.filter_w }}; ef_kw++) {
+                            {{ index_ctype }} ef_iw = (({{ index_ctype }})(ef_ow * {{ a.stride_w }} + ef_kw)) - {{ a.pad_left }};
+                            if (ef_iw >= (({{ index_ctype }}){{ a.in_w }})) continue;
+{% if a.reduce == 'max' %}
+                            if ({{ tensor_ref(in_t, ir) }}[ef_ih][ef_iw][ef_oc] > ef_best) {
+                                ef_best = {{ tensor_ref(in_t, ir) }}[ef_ih][ef_iw][ef_oc];
+                            }
+{% else %}
+                            ef_sum += {{ tensor_ref(in_t, ir) }}[ef_ih][ef_iw][ef_oc];
+                            ef_count++;
+{% endif %}
+                        }
+                    }
+{% if a.reduce == 'max' %}
+                    {{ tensor_ref(out_t, ir) }}[ef_oh][ef_ow][ef_oc] = ef_best;
+{% else %}
+                    {{ tensor_ref(out_t, ir) }}[ef_oh][ef_ow][ef_oc] = ({{ board.type_of('activation_i8') }})(ef_sum / (({{ board.type_of('quant_accum') }})ef_count));
+{% endif %}
+                }
+            }
+        }
+    }
+{% endmacro %}
+
+{% macro emit_activation(node, ir, board, index_ctype) %}
+{% set t = ir.tensors[node.inputs[0]] %}
+{% set kind = node.attrs.kind %}
+    {
+        {{ index_ctype }} ef_i;
+        for (ef_i = 0; ef_i < {{ t.size }}; ef_i++) {
+{% if kind == 'relu' %}
+            if ({{ tensor_ref(t, ir) }}[ef_i] < 0.0f) {{ '{' }} {{ tensor_ref(t, ir) }}[ef_i] = 0.0f; {{ '}' }}
+{% elif kind == 'relu6' %}
+            if ({{ tensor_ref(t, ir) }}[ef_i] < 0.0f) {{ '{' }} {{ tensor_ref(t, ir) }}[ef_i] = 0.0f; {{ '}' }}
+            else if ({{ tensor_ref(t, ir) }}[ef_i] > 6.0f) {{ '{' }} {{ tensor_ref(t, ir) }}[ef_i] = 6.0f; {{ '}' }}
+{% endif %}
+        }
+    }
+{% endmacro %}
+
+{% macro emit_node(node, ir, board, index_ctype) %}
+{% if node.op == 'tree' %}
+{{ emit_tree(node, ir, board, index_ctype) }}
+{% elif node.op == 'linear' %}
+{{ emit_linear(node, ir, board, index_ctype) }}
+{% elif node.op == 'conv2d' %}
+{{ emit_conv2d(node, ir, board, index_ctype) }}
+{% elif node.op == 'depthwise_conv2d' %}
+{{ emit_depthwise_conv2d(node, ir, board, index_ctype) }}
+{% elif node.op == 'maxpool2d' %}
+{{ emit_pool2d(node, ir, board, index_ctype) }}
+{% elif node.op == 'activation' %}
+{{ emit_activation(node, ir, board, index_ctype) }}
+{% endif %}
+{% endmacro %}

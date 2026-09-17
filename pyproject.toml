@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edgeforge"
+version = "0.1.0"
+description = "Model-to-embedded-C deployment toolkit: trained ML model + target board -> compiling C/H (and firmware, best-effort)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "jinja2>=3.0",
+    "pyyaml>=6.0",
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+sklearn = ["scikit-learn>=1.0", "scipy>=1.8"]
+tensorflow = ["tensorflow-cpu>=2.12"]
+onnx = ["onnx>=1.13", "onnxruntime>=1.14"]
+dev = ["pytest>=7.0"]
+all = [
+    "scikit-learn>=1.0",
+    "scipy>=1.8",
+    "tensorflow-cpu>=2.12",
+    "onnx>=1.13",
+    "onnxruntime>=1.14",
+    "pytest>=7.0",
+]
+
+[project.scripts]
+edgeforge = "edgeforge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["edgeforge*"]
+
+[tool.setuptools.package-data]
+edgeforge = ["codegen/templates/**/*.j2", "boards/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

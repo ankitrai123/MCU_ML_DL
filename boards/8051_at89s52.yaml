@@ -1,0 +1,66 @@
+# Atmel AT89S52: classic 8-bit 8051 core. 256 bytes of on-chip RAM, 8 KB of
+# on-chip flash, no FPU, no MMU, Harvard-ish memory spaces (SDCC needs an
+# explicit keyword to place data in code/flash space rather than RAM).
+# Deliberately the most constrained board in the registry, to stress-test
+# that the abstraction (and not just the "easy" 32-bit targets) holds.
+id: 8051_at89s52
+name: "AT89S52 (8051 core, 8KB flash / 256B RAM)"
+architecture: mcs51
+bits: 8
+endianness: little
+clock_hz: 11059200      # common AT89S52 crystal (accurate UART baud division)
+
+# 8051 is scoped to classical/lightweight models only -- no TFLite runtime,
+# no deep nets. A board with model_tier: classical rejects "deep" IR at the
+# gating step before any code is generated.
+model_tier: classical
+
+memory:
+  flash_bytes: 8192        # 8 KB on-chip program memory
+  ram_bytes: 256           # 256 B on-chip data memory
+  flash_reserved_bytes: 1024    # SDCC runtime (float lib, crt0) headroom
+  ram_reserved_bytes: 16        # register banks + bit-addressable region + stack safety margin
+  # SDCC's default calling convention is non-reentrant: every function's locals get a permanent
+  # static slot instead of sharing stack space, so real usage runs well above a flat sum of
+  # buffer sizes. Empirically ~2.2x on a small decision tree; 2.5x leaves a safety margin.
+  ram_overhead_multiplier: 2.5
+
+c_dialect:
+  types:
+    weight_i8: int8_t
+    bias_i32: int32_t
+    activation_i8: int8_t
+    quant_accum: int32_t     # unused on this board (model_tier: classical has no int8 deep path) but always defined
+    real: float
+    classical_accum: float
+    index: uint8_t           # trees/layers on this board are small enough that 8 bits always indexes them
+    class_index: uint8_t
+  rom_qualifier: "__code"     # SDCC keyword (in addition to the `const` codegen always emits): place
+                               # const data in code/flash space instead of internal RAM
+  rom_guard_macro: "__SDCC"   # only defined when actually compiling with SDCC; guards the keyword out for host gcc validation builds
+  ram_qualifier: ""            # default (internal RAM / "small" memory model) is plenty for a few scalar buffers
+  ram_guard_macro: null
+  function_attributes: ""      # non-reentrant (default SDCC convention) -- cheaper than __reentrant's software stack, and nothing here recurses
+  extra_includes: []
+
+toolchain:
+  compiler: sdcc
+  compile_args:
+    - "-mmcs51"
+    - "--std-c99"
+    - "--model-small"
+    - "--opt-code-size"
+  link_args: []
+  linker_script: null          # SDCC's own linker places code/data by memory model; no GNU-ld script involved
+  objcopy: null                # sdcc emits Intel HEX directly from `-o out.hex`, no separate objcopy step
+  output_format: ihex
+  needs_startup_stub: false    # SDCC supplies crt0 automatically for a normal `void main(void)`
+  compile_per_file: true       # sdcc only accepts one source file per invocation ("cannot compile
+                                # more than one source file"): compile each .c to .rel, then link the .rels
+  object_ext: rel
+  install_hint: "Debian/Ubuntu: apt-get install sdcc"
+
+host_test:
+  compiler: gcc
+  compile_args: ["-std=c99", "-O2", "-Wall"]
+  link_args: ["-lm"]

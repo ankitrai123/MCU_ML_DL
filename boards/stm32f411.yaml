@@ -1,0 +1,67 @@
+# STM32F411 (e.g. STM32F411CE/RE "Black Pill") -- Cortex-M4F, 100 MHz.
+# Real vendor memory map: flash origin 0x08000000, SRAM origin 0x20000000.
+# https://www.st.com/resource/en/datasheet/stm32f411re.pdf
+id: stm32f411
+name: "STM32F411 (Cortex-M4, 512KB flash / 128KB RAM)"
+architecture: arm-cortex-m4
+bits: 32
+endianness: little
+clock_hz: 100000000
+
+# "deep" boards accept both neural-net (TFLite int8) and classical models --
+# they have the flash/RAM budget for either.
+model_tier: deep
+
+memory:
+  flash_bytes: 524288      # 512 KB
+  ram_bytes: 131072        # 128 KB
+  # Reserve headroom for the vector table, C runtime, main-loop locals, and a
+  # startup stack -- the model must fit in what's left, not the raw totals.
+  flash_reserved_bytes: 16384   # 16 KB
+  ram_reserved_bytes: 8192      # 8 KB stack + globals headroom
+
+c_dialect:
+  types:
+    weight_i8: int8_t
+    bias_i32: int32_t
+    activation_i8: int8_t
+    quant_accum: int32_t
+    real: float
+    classical_accum: float
+    index: uint16_t
+    class_index: uint8_t
+  rom_qualifier: ""             # no extra keyword beyond the `const` codegen always emits -- flash placement
+                                 # comes from the linker script's .rodata section, not a storage-class keyword
+  rom_guard_macro: null         # null = always valid, no #ifdef needed
+  ram_qualifier: ""
+  ram_guard_macro: null
+  function_attributes: ""       # normal ARM AAPCS calling convention, nothing special needed
+  extra_includes: []
+
+toolchain:
+  compiler: arm-none-eabi-gcc
+  compile_args:
+    - "-mcpu=cortex-m4"
+    - "-mthumb"
+    - "-mfloat-abi=soft"
+    - "-Os"
+    - "-std=c99"
+    - "-ffreestanding"
+    - "-Wall"
+  link_args:
+    - "-nostdlib"
+    - "-Wl,--gc-sections"
+    - "-lgcc"   # soft-float runtime helpers (__aeabi_fadd etc.) -- not part of libc, safe under -nostdlib
+  linker_script: "generic.ld.j2"
+  linker_origins:
+    flash: 0x08000000
+    ram: 0x20000000
+  objcopy: arm-none-eabi-objcopy
+  output_format: ihex
+  needs_startup_stub: true       # bare-metal ARM needs a reset handler + vector table
+  install_hint: "Debian/Ubuntu: apt-get install gcc-arm-none-eabi"
+
+host_test:
+  compiler: gcc
+  compile_args: ["-std=c99", "-O2", "-Wall"]
+  link_args: ["-lm"]

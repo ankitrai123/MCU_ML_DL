@@ -1,0 +1,79 @@
+# ESP32 (original, Xtensa LX6 core) -- added purely as the architectural proof
+# that a new board needs a YAML file and nothing else: a genuinely different
+# CPU architecture and toolchain family (Xtensa/xtensa-esp32-elf-gcc, not
+# ARM/arm-none-eabi-gcc or 8051/sdcc), reusing the exact same generator code
+# and even the same generic.ld.j2 linker script template as the ARM boards.
+#
+# This is a deliberately simplified single flash-region + single RAM-region
+# memory model (not an ESP-IDF-accurate IRAM/DRAM/flash-cache map), enough to
+# demonstrate the registry abstraction generalizing to inference code. A real
+# ESP32 firmware target -- with WiFi/BT stack, esptool.py flashing, FreeRTOS,
+# and Arduino-CLI/ESP-IDF build integration -- is exactly the kind of thing
+# Phase 2's Arduino CLI backend is for, not this generic bare-metal path.
+#
+# The xtensa-esp32-elf-gcc toolchain isn't installed in this environment (it's
+# not a simple apt package; Espressif ships it via the ESP-IDF installer or
+# crosstool-NG), so `edgeforge convert --board esp32_native` exercises the
+# "toolchain not found" best-effort path: C source generation and host-side
+# golden-vector validation still run and still gate correctness -- only the
+# actual cross-compiled firmware image is skipped, with a clear message
+# naming what's missing, exactly as it would for any board whose toolchain a
+# given machine happens not to have installed.
+id: esp32_native
+name: "ESP32 (Xtensa LX6, simplified single-region memory model)"
+architecture: xtensa-lx6
+bits: 32
+endianness: little
+clock_hz: 240000000
+
+model_tier: deep
+
+memory:
+  flash_bytes: 1048576     # 1 MB (of a typical 4 MB external SPI flash) reserved for the app image
+  ram_bytes: 327680        # 320 KB (of 520 KB total SRAM) left after a simplified allowance for the
+                            # WiFi/BT stack and RTOS a real ESP32 app would also be running
+  flash_reserved_bytes: 32768
+  ram_reserved_bytes: 16384
+
+c_dialect:
+  types:
+    weight_i8: int8_t
+    bias_i32: int32_t
+    activation_i8: int8_t
+    quant_accum: int32_t
+    real: float
+    classical_accum: float
+    index: uint16_t
+    class_index: uint8_t
+  rom_qualifier: ""
+  rom_guard_macro: null
+  ram_qualifier: ""
+  ram_guard_macro: null
+  function_attributes: ""
+  extra_includes: []
+
+toolchain:
+  compiler: xtensa-esp32-elf-gcc
+  compile_args:
+    - "-mlongcalls"   # Xtensa: required once code/data span more than a short-call's reach
+    - "-Os"
+    - "-std=c99"
+    - "-ffreestanding"
+    - "-Wall"
+  link_args:
+    - "-nostdlib"
+    - "-Wl,--gc-sections"
+    - "-lgcc"
+  linker_script: "generic.ld.j2"    # the exact same template file stm32f411/native_cortex_m4 use
+  linker_origins:
+    flash: 0x00000000
+    ram: 0x3FFB0000          # roughly ESP32's real internal DRAM base, for a plausible (if simplified) map
+  objcopy: xtensa-esp32-elf-objcopy
+  output_format: ihex
+  needs_startup_stub: true
+  install_hint: "Espressif's Xtensa ESP32 toolchain ships via the ESP-IDF installer or crosstool-NG, not a plain apt package -- see Espressif's toolchain setup docs."
+
+host_test:
+  compiler: gcc
+  compile_args: ["-std=c99", "-O2", "-Wall"]
+  link_args: ["-lm"]
