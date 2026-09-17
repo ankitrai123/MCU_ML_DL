@@ -22,7 +22,9 @@ conventions, toolchain invocation — is *data* on a board profile, not a
 
 ```bash
 pip install -r requirements.txt
-# Cross toolchains (best-effort: EdgeForge still generates + validates source without them)
+# Cross toolchains, Linux (Debian/Ubuntu) -- best-effort: EdgeForge still
+# generates + validates source without these, see "Toolchain setup" below
+# for Windows/macOS and for the host compiler validation always needs.
 apt-get install gcc-arm-none-eabi sdcc
 
 # Produce a demo model, then convert it
@@ -62,6 +64,56 @@ boards in /path/to/boards:
 and prints its IR (and, with `--board`, the footprint report) without
 generating anything — useful for sanity-checking a model before committing to
 a full convert.
+
+### Toolchain setup
+
+Two *separate* things need a C compiler, and it's easy to install one and
+still hit an error because the other is missing:
+
+1. **The host compiler** — validation always compiles the generated C on
+   your machine and runs it there (never on real hardware), regardless of
+   which board you're targeting. Without it, `convert` fails at the
+   golden-vector step with a message naming the missing compiler, even if
+   the target board's own toolchain is installed.
+2. **The target board's cross-compiler** (`arm-none-eabi-gcc` for
+   stm32f411/native_cortex_m4, `sdcc` for 8051_at89s52) — optional. Without
+   it, `convert` still succeeds: it generates the C source and runs the
+   golden-vector check, and just prints which toolchain is missing instead
+   of producing a compiled `.hex`.
+
+**Linux (Debian/Ubuntu):** `gcc` (host) is normally already present;
+`apt-get install gcc-arm-none-eabi sdcc` gets the other two.
+
+**macOS:** `xcode-select --install` gets a host `gcc`/`clang`;
+`brew install --cask gcc-arm-embedded && brew install sdcc` gets the other two.
+
+**Windows:** there's no built-in C compiler at all, so `apt-get` (a Linux
+package manager) won't exist, and you need the host compiler explicitly.
+[MSYS2](https://www.msys2.org/) provides all three in one place:
+
+```powershell
+winget install --id=MSYS2.MSYS2 -e
+```
+
+Open the **"MSYS2 MSYS"** shortcut from the Start menu and run:
+
+```bash
+pacman -Syu   # if it asks you to close and reopen the window partway through, do so, then run this again
+pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-arm-none-eabi-toolchain mingw-w64-x86_64-sdcc
+```
+
+Then add `C:\msys64\mingw64\bin` to your PATH (search "Environment
+Variables" in the Start menu → *Edit environment variables for your
+account* → *Path* → *New*), open a **new** PowerShell/cmd window, and verify:
+
+```powershell
+gcc --version
+arm-none-eabi-gcc --version
+sdcc --version
+```
+
+`python -m edgeforge convert ...` (in your regular PowerShell/cmd, with
+Python already installed) will then find all three.
 
 ### Web UI
 

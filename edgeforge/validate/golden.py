@@ -95,6 +95,15 @@ def run_golden_validation(
 
     build_res = build_host_executable([model_c_path, golden_c_path], out_dir, board, exe_name="golden_test")
     if not build_res.success:
+        if build_res.toolchain_missing:
+            raise ValidationError(
+                f"golden-vector validation needs a host C compiler ('{build_res.toolchain_missing}'), which isn't "
+                "installed (or not on PATH) on this machine. This is separate from a target board's cross-compiler "
+                "(arm-none-eabi-gcc/sdcc) -- validation always runs on the host, regardless of target board. "
+                "On Linux: apt-get install gcc (or your distro's equivalent). On macOS: xcode-select --install. "
+                "On Windows: install MSYS2 (https://www.msys2.org/) and run "
+                "`pacman -S mingw-w64-x86_64-gcc`, then add C:\\msys64\\mingw64\\bin to your PATH."
+            )
         raise ValidationError(f"golden-vector harness failed to compile/link on the host:\n{build_res.log}")
 
     try:

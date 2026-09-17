@@ -1,5 +1,8 @@
+import pytest
+
 from edgeforge.boards.registry import BoardRegistry
 from edgeforge.codegen.generator import generate
+from edgeforge.errors import ValidationError
 from edgeforge.ingest import sklearn_ingest
 from edgeforge.validate.golden import run_golden_validation
 
@@ -52,3 +55,17 @@ def test_golden_validation_detects_a_real_mismatch(tree_clf_path, boards_dir, tm
 
     report = run_golden_validation(result, board, gen.model_c, tmp_path, n_samples=20)
     assert not report.all_passed
+
+
+def test_missing_host_compiler_raises_clear_message(tree_clf_path, boards_dir, tmp_path, monkeypatch):
+    """A user with no host C compiler at all (e.g. a fresh Windows machine) must get a
+    message naming the missing tool and how to install it, not an empty-log failure --
+    regression test for exactly that gap."""
+    reg = BoardRegistry(boards_dir)
+    result = sklearn_ingest.ingest(tree_clf_path)
+    board = reg.get("stm32f411")
+    gen = generate(result.ir, board, tmp_path)
+
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    with pytest.raises(ValidationError, match="host C compiler"):
+        run_golden_validation(result, board, gen.model_c, tmp_path, n_samples=5)
