@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}EdgeForge — Result{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('index') }}">&larr; convert another model</a>
+
+{% if crash %}
+<div class="card">
+  <h2>Unexpected error</h2>
+  <p>Something went wrong that wasn't one of EdgeForge's own validation errors:</p>
+  <pre>{{ crash }}</pre>
+</div>
+{% else %}
+
+<div class="card">
+  <h2>
+    Result for board <code>{{ board.id }}</code>
+    {% if result.ok %}
+      <span class="badge ok">success</span>
+    {% else %}
+      <span class="badge bad">failed</span>
+    {% endif %}
+  </h2>
+
+  {% if result.ingest_result %}
+  <div class="stage">
+    <h3>Model</h3>
+    <pre>{{ result.ingest_result.ir.describe() }}</pre>
+  </div>
+  {% endif %}
+
+  {% if result.error_stage == 'ingest' %}
+  <div class="stage">
+    <h3>Ingest error</h3>
+    <pre>{{ result.error }}</pre>
+  </div>
+  {% endif %}
+
+  {% if result.footprint %}
+  <div class="stage">
+    <h3>Footprint
+      <span class="badge {{ 'ok' if result.footprint.fits else 'bad' }}">{{ 'fits' if result.footprint.fits else 'exceeds budget' }}</span>
+    </h3>
+    <pre>{{ result.footprint.describe(board) }}</pre>
+  </div>
+  {% endif %}
+
+  {% if result.error_stage == 'footprint' %}
+  <div class="stage">
+    <h3>Footprint error</h3>
+    <pre>{{ result.error }}</pre>
+  </div>
+  {% endif %}
+
+  {% if result.build %}
+  <div class="stage">
+    <h3>Build
+      {% if result.build.success %}
+        <span class="badge ok">compiled</span>
+      {% elif result.build.toolchain_missing %}
+        <span class="badge warn">toolchain not installed</span>
+      {% else %}
+        <span class="badge bad">build failed</span>
+      {% endif %}
+    </h3>
+    <pre>{{ result.build.summary() }}</pre>
+  </div>
+  {% endif %}
+
+  {% if result.golden %}
+  <div class="stage">
+    <h3>Golden-vector validation
+      <span class="badge {{ 'ok' if result.golden.all_passed else 'bad' }}">{{ result.golden.n_pass }}/{{ result.golden.n_total }} matched</span>
+    </h3>
+    <pre>{{ result.golden.describe() }}</pre>
+  </div>
+  {% endif %}
+
+  {% if result.error_stage == 'validate' %}
+  <div class="stage">
+    <h3>Validation error</h3>
+    <pre>{{ result.error }}</pre>
+  </div>
+  {% endif %}
+</div>
+
+{% if files %}
+<div class="card">
+  <h2>Generated files</h2>
+  <ul class="filelist">
+    {% for f in files %}
+    <li>
+      <span>{{ f }}</span>
+      <a href="{{ url_for('download_file', run_id=run_id, filename=f) }}">download</a>
+    </li>
+    {% endfor %}
+  </ul>
+  <a href="{{ url_for('download_all', run_id=run_id) }}"><button type="button">Download all as .zip</button></a>
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}

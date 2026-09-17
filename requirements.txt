@@ -16,3 +16,6 @@ onnxruntime>=1.14
 
 # Tests
 pytest>=7.0
+
+# Basic local web UI (`python -m edgeforge serve`)
+flask>=3.0

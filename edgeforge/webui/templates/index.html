@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}EdgeForge — Convert{% endblock %}
+{% block content %}
+<form class="card" action="{{ url_for('convert') }}" method="post" enctype="multipart/form-data">
+  <h2>Convert a model</h2>
+
+  <label for="model_file">Trained model file</label>
+  <input type="file" id="model_file" name="model_file" accept=".pkl,.pickle,.h5,.keras,.onnx" required>
+  <p class="board-hint">.pkl/.pickle (scikit-learn), .h5/.keras (TensorFlow/Keras), or .onnx</p>
+
+  <label for="board_id">Target board</label>
+  <select id="board_id" name="board_id" required>
+    {% for b in boards %}
+      <option value="{{ b.id }}">{{ b.id }} &mdash; {{ b.name }}</option>
+    {% endfor %}
+  </select>
+
+  <table style="width:100%; margin-top:0.75rem; font-size:0.82rem; color:var(--muted); border-collapse:collapse;">
+    <thead>
+      <tr style="text-align:left; border-bottom:1px solid var(--border);">
+        <th style="padding:0.3rem 0.5rem 0.3rem 0;">board</th>
+        <th style="padding:0.3rem 0.5rem;">tier</th>
+        <th style="padding:0.3rem 0.5rem;">arch</th>
+        <th style="padding:0.3rem 0.5rem;">flash</th>
+        <th style="padding:0.3rem 0.5rem;">ram</th>
+        <th style="padding:0.3rem 0.5rem;">toolchain</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for b in boards %}
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:0.3rem 0.5rem 0.3rem 0; font-family:monospace;">{{ b.id }}</td>
+        <td style="padding:0.3rem 0.5rem;">{{ b.model_tier }}</td>
+        <td style="padding:0.3rem 0.5rem;">{{ b.architecture }}</td>
+        <td style="padding:0.3rem 0.5rem;">{{ b.memory.flash_bytes }}B</td>
+        <td style="padding:0.3rem 0.5rem;">{{ b.memory.ram_bytes }}B</td>
+        <td style="padding:0.3rem 0.5rem;">{{ b.toolchain.compiler }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <details>
+    <summary>Advanced options</summary>
+    <div class="row">
+      <div>
+        <label for="task">Task</label>
+        <select id="task" name="task">
+          <option value="auto" selected>auto-detect</option>
+          <option value="classification">classification</option>
+          <option value="regression">regression</option>
+        </select>
+      </div>
+      <div>
+        <label for="samples">Golden-vector samples</label>
+        <input type="number" id="samples" name="samples" value="20" min="1" max="500">
+      </div>
+    </div>
+    <label for="sample_range">Input sample range (optional)</label>
+    <input type="text" id="sample_range" name="sample_range" placeholder="e.g. -2,8 (defaults per model type)">
+    <p class="board-hint">Used to generate golden-vector test inputs (and, for .h5/.keras without representative data, synthetic quantization data). Leave blank to use the built-in default for the model type.</p>
+  </details>
+
+  <button type="submit">Convert</button>
+</form>
+{% endblock %}

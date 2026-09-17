@@ -8,12 +8,10 @@ from pathlib import Path
 
 from edgeforge import __version__
 from edgeforge.boards.registry import BoardRegistry
-from edgeforge.build.toolchain import build_firmware
-from edgeforge.codegen.generator import generate
 from edgeforge.errors import EdgeForgeError
 from edgeforge.ingest import detect_and_ingest
+from edgeforge.pipeline import run_conversion
 from edgeforge.quantize.footprint import check_budget
-from edgeforge.validate.golden import run_golden_validation
 
 
 def _parse_range(s: str | None) -> tuple[float, float] | None:
@@ -51,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     insp.add_argument("--board", default=None, help="optional: report footprint against this board's budget")
 
     lb = sub.add_parser("list-boards", help="list available board ids")
+
+    srv = sub.add_parser("serve", help="run a basic local web UI (upload a model, pick a board, convert) at http://host:port")
+    srv.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1, i.e. local machine only)")
+    srv.add_argument("--port", type=int, default=5000)
+    srv.add_argument("--debug", action="store_true", help="enable Flask's debug/reloader mode (development only)")
 
     return p
 
@@ -109,58 +112,76 @@ def cmd_convert(args: argparse.Namespace) -> int:
     if board is None:
         return 1
 
-    print(f"== ingesting {args.model} ==")
-    try:
-        result = detect_and_ingest(
-            args.model,
-            sample_range=_parse_range(args.sample_range),
-            task=args.task,
-            representative_data=_load_rep_data(args.rep_data),
-        )
-    except EdgeForgeError as e:
-        print(f"error: {e}", file=sys.stderr)
+    print(f"== converting {args.model} for '{board.id}' ==")
+    result = run_conversion(
+        args.model,
+        board,
+        args.out,
+        model_name=args.model_name,
+        task=args.task,
+        sample_range=_parse_range(args.sample_range),
+        representative_data=_load_rep_data(args.rep_data),
+        do_build=not args.no_build,
+        do_validate=not args.no_validate,
+        samples=args.samples,
+        seed=args.seed,
+    )
+
+    if result.ingest_result:
+        print(result.ingest_result.ir.describe())
+    if result.error and result.error_stage == "ingest":
+        print(f"error: {result.error}", file=sys.stderr)
         return 1
-    ir = result.ir
-    print(ir.describe())
 
-    print(f"\n== checking footprint against board '{board.id}' ==")
-    try:
-        report = check_budget(ir, board)
-    except EdgeForgeError as e:
-        print(f"error: {e}", file=sys.stderr)
+    if result.footprint:
+        print(f"\n== footprint against board '{board.id}' ==")
+        print(result.footprint.describe(board))
+    if result.error and result.error_stage == "footprint":
+        print(f"error: {result.error}", file=sys.stderr)
         return 1
-    print(report.describe(board))
 
-    print(f"\n== generating C source into {args.out} ==")
-    gen = generate(ir, board, args.out, model_name=args.model_name)
-    generated_names = [p.name for p in [gen.model_h, gen.model_c, gen.main_c, gen.linker_script, gen.startup_c] if p]
-    print("generated: " + ", ".join(generated_names))
+    if result.generated:
+        names = [p.name for p in [result.generated.model_h, result.generated.model_c, result.generated.main_c, result.generated.linker_script, result.generated.startup_c] if p]
+        print(f"\n== generated C source into {args.out} ==")
+        print("generated: " + ", ".join(names))
 
-    build_ok = True
-    if not args.no_build:
-        print(f"\n== building firmware for '{board.id}' ==")
-        build_res = build_firmware(gen, board)
-        print(build_res.summary())
-        if not build_res.success and not build_res.toolchain_missing:
-            build_ok = False
+    if result.build:
+        print(f"\n== build for '{board.id}' ==")
+        print(result.build.summary())
 
-    validate_ok = True
-    if not args.no_validate:
+    if result.golden:
         print(f"\n== golden-vector validation ({args.samples} samples) ==")
-        try:
-            golden_report = run_golden_validation(result, board, gen.model_c, args.out, model_name=args.model_name, n_samples=args.samples, seed=args.seed)
-        except EdgeForgeError as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 1
-        print(golden_report.describe())
-        validate_ok = golden_report.all_passed
+        print(result.golden.describe())
+    if result.error and result.error_stage == "validate":
+        print(f"error: {result.error}", file=sys.stderr)
+        return 1
 
     print()
-    if build_ok and validate_ok:
+    if result.ok:
         print("convert: SUCCESS")
         return 0
-    print("convert: FAILED" + ("" if build_ok else " (build error)") + ("" if validate_ok else " (golden-vector mismatch)"), file=sys.stderr)
+    build_bad = result.build and not result.build.success and not result.build.toolchain_missing
+    validate_bad = result.golden and not result.golden.all_passed
+    print(
+        "convert: FAILED" + (" (build error)" if build_bad else "") + (" (golden-vector mismatch)" if validate_bad else ""),
+        file=sys.stderr,
+    )
     return 1
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    try:
+        from edgeforge.webui import create_app
+    except ImportError as e:
+        print(
+            f"error: the web UI requires Flask, which is not installed ({e}). Install it with: pip install flask",
+            file=sys.stderr,
+        )
+        return 1
+    app = create_app(boards_dir=args.boards_dir)
+    print(f"EdgeForge web UI: http://{args.host}:{args.port}  (local machine only unless --host is changed; Ctrl+C to stop)")
+    app.run(host=args.host, port=args.port, debug=args.debug)
+    return 0
 
 
 def _load_rep_data(path: Path | None):
@@ -180,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_inspect(args)
     if args.command == "convert":
         return cmd_convert(args)
+    if args.command == "serve":
+        return cmd_serve(args)
     parser.print_help()
     return 1
 

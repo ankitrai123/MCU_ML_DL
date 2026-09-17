@@ -63,6 +63,27 @@ and prints its IR (and, with `--board`, the footprint report) without
 generating anything — useful for sanity-checking a model before committing to
 a full convert.
 
+### Web UI
+
+For end users who'd rather not use the CLI, `python -m edgeforge serve`
+starts a basic local web UI at `http://127.0.0.1:5000`: upload a model, pick
+a board from a dropdown (with each board's tier/flash/RAM/toolchain shown
+inline), click Convert, and get the same footprint/build/golden-vector
+report as the CLI plus download links for every generated file (or a
+"download all as .zip" button).
+
+```bash
+pip install -r requirements.txt   # includes flask
+python -m edgeforge serve
+```
+
+It's a thin layer over the same `edgeforge.pipeline.run_conversion()` the
+CLI calls — no ingest/codegen/build/validate logic is duplicated. It's meant
+for a single local user on their own machine, the same trust model as the
+CLI: no accounts, no auth, and the same "only convert models you trust"
+caveat (ingesting a `.pkl` means unpickling it). Don't bind `--host` to a
+public interface without addressing that.
+
 ## Architecture
 
 ```
@@ -126,6 +147,16 @@ model file --[ingest]--> ModelIR --[footprint]--> gate --[codegen]--> C source -
   (best-effort: reports exactly which toolchain is missing and how to
   install it if it isn't found) and, separately, the always-available host
   compiler for the golden-vector harness.
+
+- **`edgeforge/pipeline.py`** — orchestrates ingest → footprint → codegen →
+  build → validate as one call returning a structured result (never raising
+  on an expected `EdgeForgeError`, just recording which stage failed and
+  why); `cli.py`'s `convert` command and `webui/app.py`'s `/convert` route
+  both call this instead of duplicating the orchestration.
+
+- **`edgeforge/webui/`** — the basic local web UI described above: a Flask
+  app calling straight into `pipeline.run_conversion()`, plus the templates
+  and a little CSS. No business logic lives here.
 
 - **`edgeforge/validate/golden.py`** — the main defense against silent
   precision bugs. N sample inputs run through the *original* model
@@ -229,6 +260,8 @@ meta-test, so a green suite means the validation harness is actually
 checking something. Tests that invoke the cross toolchains
 (`arm-none-eabi-gcc`, `sdcc`) skip cleanly if those aren't installed; golden
 validation itself never needs them (host-only, per the design above).
+`test_webui.py` covers the upload/convert/download flow and path-traversal
+rejection on the download route, and skips cleanly if Flask isn't installed.
 
 ## Roadmap (context only — not built in this phase)
 
@@ -236,5 +269,7 @@ validation itself never needs them (host-only, per the design above).
   drive `arduino-cli compile`/`upload` headlessly.
 - **Phase 3**: an FPGA backend for quantization-aware models, wrapping
   hls4ml/FINN rather than writing HLS generation from scratch.
-- **Phase 4**: a web front end (upload, training, target picker) on top of
-  this library.
+- **Phase 4**: a full hosted web front end (accounts, an upload *service*,
+  training, a target picker) on top of this library. The `serve` command
+  above is a basic single-user local UI added ahead of that — a thin layer
+  over the same library, not the Phase 4 service.

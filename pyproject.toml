@@ -19,6 +19,7 @@ dependencies = [
 sklearn = ["scikit-learn>=1.0", "scipy>=1.8"]
 tensorflow = ["tensorflow-cpu>=2.12"]
 onnx = ["onnx>=1.13", "onnxruntime>=1.14"]
+ui = ["flask>=3.0"]
 dev = ["pytest>=7.0"]
 all = [
     "scikit-learn>=1.0",
@@ -26,6 +27,7 @@ all = [
     "tensorflow-cpu>=2.12",
     "onnx>=1.13",
     "onnxruntime>=1.14",
+    "flask>=3.0",
     "pytest>=7.0",
 ]
 
@@ -36,7 +38,7 @@ edgeforge = "edgeforge.cli:main"
 include = ["edgeforge*"]
 
 [tool.setuptools.package-data]
-edgeforge = ["codegen/templates/**/*.j2", "boards/*.yaml"]
+edgeforge = ["codegen/templates/**/*.j2", "boards/*.yaml", "webui/templates/*.html", "webui/static/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
