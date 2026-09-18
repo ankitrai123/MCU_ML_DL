@@ -27,6 +27,31 @@ requires_ecp5_toolchain = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="session")
+def keras_deep_regression_path(tmp_path_factory):
+    """A deep-tier (int8/TFLite) *regression* model -- the one deep-tier task shape
+    test_deep_mlp_matches_tflite_interpreter/test_deep_cnn_matches_tflite_interpreter don't
+    cover (both are classifiers), needed to verify simulate.py's int8 output dequantization."""
+    tf = pytest.importorskip("tensorflow")
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0, 1, size=(200, 4)).astype(np.float32)
+    y = (X[:, 0] * 2 - X[:, 1] + 0.5 * X[:, 2]).astype(np.float32)
+
+    tf.random.set_seed(0)
+    inputs = tf.keras.Input(shape=(4,))
+    h = tf.keras.layers.Dense(6, activation="relu")(inputs)
+    out = tf.keras.layers.Dense(1, activation="linear")(h)
+    model = tf.keras.Model(inputs, out)
+    model.compile(optimizer="adam", loss="mse")
+    model.fit(X, y, epochs=30, verbose=0)
+
+    path = tmp_path_factory.mktemp("models") / "deep_regr.keras"
+    model.save(path)
+    return path
+
+
 @requires_iverilog
 def test_tree_classifier_matches_sklearn(tree_clf_path, tmp_path):
     result = sklearn_ingest.ingest(tree_clf_path)
@@ -82,6 +107,21 @@ def test_deep_cnn_matches_tflite_interpreter(keras_cnn_path, tmp_path):
     assert ops == ["conv2d", "maxpool2d", "depthwise_conv2d", "linear"]
     report = run_verilog_simulation(result, tmp_path, n_samples=20, seed=0)
     assert report.all_passed, report.describe()
+
+
+@requires_iverilog
+def test_deep_regression_output_dequantized_correctly(keras_deep_regression_path, tmp_path):
+    """The one deep-tier task shape the other deep-tier tests don't cover: a regression output
+    must be dequantized via its own tensor's TFLite scale/zero_point (simulate.py's
+    _dequantize_output), not the classical tier's Q16.16 -- classification tests can't catch
+    this bug since they only ever check the predicted class, never the raw output value."""
+    result = keras_ingest.ingest(keras_deep_regression_path, sample_range=(0.0, 1.0), task="regression")
+    assert result.ir.kind == "deep"
+    assert result.ir.task == "regression"
+    report = run_verilog_simulation(result, tmp_path, n_samples=15, seed=0)
+    assert report.all_passed, report.describe()
+    for s in report.samples:
+        assert abs(s.got_output[0] - s.ref_output[0]) < 1e-3
 
 
 def test_transcendental_activation_rejected_with_a_clear_error():

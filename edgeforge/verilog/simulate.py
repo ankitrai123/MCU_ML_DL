@@ -19,6 +19,7 @@ import numpy as np
 
 from edgeforge.errors import ToolchainNotFoundError, ValidationError
 from edgeforge.ingest.base import IngestResult
+from edgeforge.ir import ModelIR, dequantize_affine
 from edgeforge.verilog import codegen
 from edgeforge.verilog.fixedpoint import from_fixed_array
 
@@ -28,6 +29,20 @@ from edgeforge.verilog.fixedpoint import from_fixed_array
 REGRESSION_ATOL = 1e-2
 
 _DATA_LINE_RE = re.compile(r"^-?\d+(,-?\d+)+$")
+
+
+def _dequantize_output(ir: ModelIR, raw_ints) -> np.ndarray:
+    """The testbench always prints raw integers off the wire (see testbench.v.j2) -- turn them
+    back into real values the same way the RTL's own domain represents them: Q16.16 for a
+    float32 (classical-tier) output tensor, TFLite-style int8 for a quantized (deep-tier) one.
+    Only matters for a *regression* task's numeric comparison (classification is graded on
+    the predicted class alone), but dequantizing correctly either way keeps `got_output` in
+    GoldenSample/VerilogSample meaningful for debugging a classification mismatch too."""
+    raw = list(raw_ints)
+    if ir.output_spec.dtype == "float32":
+        return from_fixed_array(raw)
+    scale, zero_point = ir.output_spec.scale[0], ir.output_spec.zero_point[0]
+    return np.array([dequantize_affine(v, scale, zero_point) for v in raw], dtype=np.float64)
 
 
 @dataclass
@@ -125,17 +140,18 @@ def run_verilog_simulation(
         parts = line.split(",")
         got_class = int(parts[0])
         got_class = None if got_class == -1 else got_class
-        got_output = from_fixed_array(int(x) for x in parts[1:])
+        got_output = _dequantize_output(ir, (int(x) for x in parts[1:]))
         ref_class, ref_output = refs[i]
 
         if ir.task == "classification":
             matched = got_class == ref_class
             detail = f"Verilog predicted class {got_class}, Python reference predicted class {ref_class}"
         else:
-            matched = bool(np.allclose(got_output, ref_output, atol=REGRESSION_ATOL))
+            atol = 2.0 * ir.output_spec.scale[0] if ir.kind == "deep" else REGRESSION_ATOL
+            matched = bool(np.allclose(got_output, ref_output, atol=atol))
             detail = (
                 f"Verilog output {got_output.tolist()} vs Python reference {ref_output.tolist()} "
-                f"(atol={REGRESSION_ATOL})"
+                f"(atol={atol})"
             )
 
         samples.append(

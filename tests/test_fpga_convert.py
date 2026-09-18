@@ -110,6 +110,29 @@ def test_cli_convert_fpga_reports_failure_on_divergence(keras_mlp_path, tmp_path
     assert "convert-fpga: FAILED" in captured.err
 
 
+@pytest.mark.parametrize(
+    "backend, part, expected_tool",
+    [
+        ("Quartus", "10AS020H2F34E1SG", "i++"),
+        ("Catapult", "xcku115-flvb2104-2-i", "catapult"),
+    ],
+)
+def test_synthesize_reports_the_right_missing_tool_per_backend(keras_mlp_path, tmp_path, backend, part, expected_tool):
+    """Each hls4ml backend shells out to its own real synthesis tool under a different name
+    (confirmed by reading each backend's own build() source) -- a naive "check for vivado_hls
+    regardless of --backend" would report the wrong tool as missing here, or (Quartus/OneAPI
+    don't accept the Vivado-shaped build() kwargs at all) crash with a bare TypeError instead
+    of ever reporting a missing-toolchain result."""
+    result = convert_and_validate(
+        keras_mlp_path, tmp_path / "hls_proj", backend=backend, part=part,
+        sample_range=SAMPLE_RANGE, n_samples=5, tolerance=ROBUST_TOLERANCE, attempt_synthesis=True,
+    )
+    assert result.ok  # csim validation is backend-agnostic and unaffected
+    assert not result.synth_attempted
+    assert result.toolchain_missing == expected_tool
+    assert expected_tool in result.install_hint
+
+
 def test_missing_hls4ml_raises_actionable_error(monkeypatch, keras_mlp_path, tmp_path):
     import sys
 

@@ -410,12 +410,19 @@ This always does two things, and stops there unless you ask for more:
    cross-compiled `model.c`. `convert-fpga` reports SUCCESS/FAILED from this
    check alone; nothing here ever touches real hardware.
 
-Pass `--synthesize` to also attempt **real Vivado HLS synthesis**
-(`hmodel.build()`) for actual LUT/FF/DSP/BRAM numbers. This needs Xilinx
-Vivado HLS/Vitis HLS installed with `vivado_hls` on `PATH` — exactly like a
-missing cross-compiler for any other board, a missing `vivado_hls` prints an
-install hint and reports the HLS project as generated-and-host-verified but
-not synthesized, rather than failing the whole command.
+`--backend` isn't limited to the default Vivado — **Vitis, Quartus, and
+Catapult are also confirmed working** (both project generation and host
+C-simulation are backend-agnostic in hls4ml: every backend's csim is still
+just a plain g++-compiled shared library). Pass `--synthesize` to also
+attempt **real synthesis** (`hmodel.build()`) for actual LUT/FF/DSP/BRAM
+numbers — each backend shells out to its own real tool (`vivado_hls` for
+Vivado, `vitis-run` for Vitis, `i++` for Quartus, `catapult` for Catapult;
+confirmed by reading each backend's own source, not assumed from Vivado's),
+and a missing one prints that backend's own install hint — exactly like a
+missing cross-compiler for any other board — and reports the HLS project as
+generated-and-host-verified but not synthesized, rather than failing the
+whole command or raising a confusing `TypeError` from passing one backend's
+`build()` arguments to another's differently-shaped one.
 
 **A `Softmax` output needs a looser `--tolerance` than the default.**
 `--tolerance` (default `0.05`) is the max absolute difference allowed
@@ -449,10 +456,36 @@ its own, since (unlike `edgeforge inspect`/`convert`) it never inspects the
 model beyond its input shape and parameter count, so it always compares raw
 output values rather than predicted classes.
 
-What this backend does not do (see [Roadmap](#roadmap) for Phase 3's
-status): ingest anything but a Keras model (no sklearn/ONNX → HLS path),
-target any hls4ml backend but Vivado, or produce a bitstream/program a real
-board — synthesis stops at a resource report.
+**Keras models only — sklearn and ONNX were both tried and found not to
+fit, for two different reasons, not just left undone:**
+
+- **sklearn**: hls4ml's core has no scikit-learn converter at all (no
+  `convert_from_sklearn_model`, confirmed against the installed package) —
+  it targets neural-network layers, not decision trees or a bare
+  `LogisticRegression`. A tree ensemble could in principle go through the
+  separate [conifer](https://github.com/ssummers/conifer) project instead,
+  but that's a different tool with its own integration, not something
+  `convert-fpga` does. sklearn models are exactly what
+  [`convert-verilog`'s classical tier](#veriloglattice-backend-convert-verilog-experimental)
+  is for instead.
+- **ONNX**: hls4ml does have a native `convert_from_onnx_model`, but its
+  ONNX frontend turned out too narrow for the models that actually produce
+  ONNX files, tried three ways: a `Gemm`-based graph (`Gemm` itself isn't in
+  hls4ml's supported ONNX op list — only `MatMul`+`Add`), a hand-built
+  `MatMul`+`Add` graph (crashed inside hls4ml's own parser over missing
+  shape metadata on the weight initializers), and a real `skl2onnx`-exported
+  model (failed on the classifier post-processing ops — `Cast`, `ZipMap` —
+  every `skl2onnx` export wraps around the core network). Making this work
+  would mean EdgeForge shipping its own ONNX-graph-simplification pass
+  ahead of hls4ml's parser, a materially bigger undertaking than "pass the
+  file through" — not attempted here.
+
+Also not done (see [Roadmap](#roadmap) for Phase 3's status): FINN
+integration (a separate framework, for binary/extreme quantization —
+its own installation and typically a Brevitas-quantized PyTorch model as
+input, not something layered in alongside everything above without its own
+scoping pass) or producing a bitstream/programming a real board — synthesis
+stops at a resource report.
 
 ## Verilog/Lattice backend (`convert-verilog`, experimental)
 
@@ -538,14 +571,19 @@ step, not by inspection:**
    only blocks the optional real place-and-route step, and reports as a
    clear, handled failure (`synth_ok=False`), not a crash.
 
+A deep-tier *regression* model's raw output — not just its predicted class
+— is dequantized correctly for the host-side comparison too, via its own
+tensor's TFLite scale/zero-point rather than the classical tier's Q16.16;
+confirmed against a real `Dense(relu)→Dense(linear)` regression model
+matching the TFLite Interpreter to ~1e-6.
+
 Also not done yet: VHDL output (Verilog only — Yosys reads it natively,
-VHDL needs the separate GHDL-Yosys plugin this doesn't set up); a deep-tier
-*regression* model's raw output isn't dequantized correctly for the
-host-side comparison (only its predicted *class*, an integer, is verified
-today — every deep-tier model tested so far is a classifier); and a
-streaming or memory-mapped I/O redesign that would let a bigger model's
-compute (which already fits comfortably) actually place-and-route on a
-small device.
+VHDL needs the separate GHDL-Yosys plugin this doesn't set up); a real
+board's pin-constraint (`.lpf`) file (there's no `--lpf` passthrough yet,
+so every port lands on whatever pin NextPNR finds free — see the honest
+limitations above); and a streaming or memory-mapped I/O redesign that
+would let a bigger model's compute (which already fits comfortably) actually
+place-and-route on a small device.
 
 ## Scope and known limitations
 
@@ -570,18 +608,19 @@ small device.
   for ONNX in this phase (it would need ONNX→TF→TFLite, a fragile multi-hop
   conversion this phase doesn't need for MLP coverage); ONNX models render
   through the classical (float32) codegen path.
-- **FPGA (`convert-fpga`)**: Keras models only, hls4ml's Vivado backend
-  only, host C-simulation only (no bitstream/board programming) — see
-  [FPGA backend](#fpga-backend-convert-fpga-experimental) for why a
-  `Softmax`-output model needs a looser `--tolerance` than the default.
+- **FPGA (`convert-fpga`)**: Keras models only — sklearn (no native hls4ml
+  converter) and ONNX (hls4ml's own ONNX frontend too narrow for real
+  ONNX exports, tried three ways) were both evaluated and ruled out, not
+  just left undone; host C-simulation only (no bitstream/board
+  programming) — see [FPGA backend](#fpga-backend-convert-fpga-experimental)
+  for why a `Softmax`-output model needs a looser `--tolerance` than the
+  default, and for exactly why sklearn/ONNX don't fit.
 - **Verilog/Lattice (`convert-verilog`)**: every IR op is implemented, but a
   model with enough total input+output elements can need more I/O pins than
   the target package has, failing `--synthesize`'s place-and-route step
   outright (not a correctness problem — see [Verilog/Lattice
-  backend](#veriloglattice-backend-convert-verilog-experimental)); a
-  deep-tier *regression* model's raw output isn't dequantized correctly for
-  the host-side comparison (classification is what's verified); Verilog
-  output only, no VHDL.
+  backend](#veriloglattice-backend-convert-verilog-experimental)); Verilog
+  output only, no VHDL; no board-specific pin-constraint (`.lpf`) file.
 - **Deep-tier requantization** uses a plain `float` multiplier rather than
   TFLite Micro's integer-only fixed-point-multiply-and-shift trick. Every
   deep-tier board in the registry has usable float (hardware FPU or
@@ -702,19 +741,23 @@ rejection on the download route, and skips cleanly if Flask isn't installed.
   deliberately left as a manual `arduino-cli upload`/Arduino IDE step for now).
 - **Phase 3**: two initial FPGA backends. `convert-fpga` wraps hls4ml to
   turn a Keras model into an HLS project and host-verify it via
-  C-simulation, with best-effort real synthesis if Vivado HLS is installed
-  (see [FPGA backend](#fpga-backend-convert-fpga-experimental)). Not yet
-  done there: sklearn/ONNX → HLS ingest (Keras only so far), backends other
-  than Vivado, FINN integration (binary/extreme quantization), and anything
-  past a synthesis report. `convert-verilog` generates Verilog directly for
-  the open-source Lattice ECP5 flow and covers every IR op (see
-  [Verilog/Lattice
+  C-simulation, with best-effort real synthesis on any of Vivado/Vitis/
+  Quartus/Catapult, each backend's own toolchain detected correctly (see
+  [FPGA backend](#fpga-backend-convert-fpga-experimental)). Not yet done
+  there: sklearn ingest (hls4ml has no scikit-learn converter at all — use
+  `convert-verilog`'s classical tier instead) and ONNX ingest (hls4ml's own
+  ONNX frontend was tried and found too narrow for real ONNX exports —
+  both evaluated and ruled out, not just left undone), FINN integration
+  (binary/extreme quantization, a separate framework with its own
+  installation), and anything past a synthesis report. `convert-verilog`
+  generates Verilog directly for the open-source Lattice ECP5 flow and
+  covers every IR op including deep-tier regression output dequantization
+  (see [Verilog/Lattice
   backend](#veriloglattice-backend-convert-verilog-experimental)). Not yet
-  done there: a real board's pin-constraint file (every port is a raw
-  flattened bus today), an I/O architecture that scales past a small
-  device's pin count for a larger model, VHDL output, deep-tier regression
-  output dequantization, and any pipelining (one clock cycle per loop
-  iteration today, correctness-first).
+  done there: a real board's pin-constraint (`.lpf`) file (every port is a
+  raw flattened bus today), an I/O architecture that scales past a small
+  device's pin count for a larger model, VHDL output, and any pipelining
+  (one clock cycle per loop iteration today, correctness-first).
 - **Phase 4**: a full hosted web front end (accounts, an upload *service*,
   training, a target picker) on top of this library. The `serve` command
   above is a basic single-user local UI added ahead of that — a thin layer

@@ -9,10 +9,10 @@ target language. An activation node needing a transcendental function (softmax/s
 still can't be emitted in hardware by any EdgeForge backend and raises a clear error, exactly
 like the C codegen's own equivalent check.
 
-Known gap: a deep-tier *regression* model's output isn't dequantized correctly for the
-Python-side comparison (render_testbench/simulate.py only dequantize a classification model's
-predicted class, an integer, or a classical-tier Q16.16 regression output) -- every deep-tier
-model tested so far is a classifier, which doesn't exercise this path. See the README.
+A deep-tier *regression* model's raw output is dequantized via its own tensor's TFLite
+scale/zero_point (edgeforge/verilog/simulate.py's `_dequantize_output`), the same way a
+classical-tier one uses Q16.16 -- confirmed against a real Dense(relu)->Dense(linear) TFLite
+regression model, matching the TFLite Interpreter's own output to ~1e-6 across every sample.
 """
 
 from __future__ import annotations
