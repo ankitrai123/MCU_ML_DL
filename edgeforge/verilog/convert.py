@@ -77,10 +77,10 @@ def convert_and_validate(
     ir = ingest_result.ir
     param_count = ir.param_count()
 
-    # validate_classical_tier runs again inside render_model, but running it first gives a
+    # validate_codegen_support runs again inside render_model, but running it first gives a
     # clean error before any simulation/synthesis work starts, matching cmd_convert's own
     # "fail at the earliest stage that can tell you something's wrong" ordering.
-    codegen.validate_classical_tier(ir)
+    codegen.validate_codegen_support(ir)
 
     simulation = run_verilog_simulation(ingest_result, out_dir, module_name=module_name, n_samples=n_samples, seed=seed)
     result = VerilogBuildResult(

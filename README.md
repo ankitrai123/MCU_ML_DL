@@ -9,10 +9,13 @@ the original model.
 This is Phase 1: the conversion engine (library + CLI) for native/bare-metal
 microcontroller targets, plus an initial Arduino CLI backend (compile-only —
 see [Arduino boards](#arduino-boards-arduino-cli)) for boards whose own core
-owns startup/linking, and an initial FPGA backend (`convert-fpga`, a
-deliberately separate command — see [FPGA backend](#fpga-backend-convert-fpga-experimental))
-wrapping hls4ml. A full hosted web front end is a later phase — see
-[Roadmap](#roadmap).
+owns startup/linking, and two initial FPGA backends, each its own
+deliberately separate command: `convert-fpga` (see [FPGA
+backend](#fpga-backend-convert-fpga-experimental)), wrapping hls4ml for
+Xilinx/Vivado HLS, and `convert-verilog` (see [Verilog/Lattice
+backend](#veriloglattice-backend-convert-verilog-experimental)), a
+from-scratch RTL generator for the open-source Lattice (Yosys/NextPNR) flow.
+A full hosted web front end is a later phase — see [Roadmap](#roadmap).
 
 ## Getting started — the easy way (no coding experience needed)
 
@@ -451,6 +454,99 @@ status): ingest anything but a Keras model (no sklearn/ONNX → HLS path),
 target any hls4ml backend but Vivado, or produce a bitstream/program a real
 board — synthesis stops at a resource report.
 
+## Verilog/Lattice backend (`convert-verilog`, experimental)
+
+A second, unrelated FPGA path. hls4ml's backends are Vivado/Vitis/Quartus/
+Catapult — there's no "hls4ml for Lattice" to wrap the way `convert-fpga`
+wraps hls4ml for Xilinx, and the open-source Lattice flow (Yosys + NextPNR +
+Project Trellis) takes synthesizable Verilog/VHDL directly, not HLS C++. So
+`convert-verilog` is a from-scratch RTL generator: it lowers a model into
+actual Verilog itself, reusing the *same* sklearn/Keras ingest paths and
+`ModelIR` every other command uses, through entirely new templates
+(`edgeforge/verilog/`) and a new numeric representation, since a small FPGA
+has no float unit. Also its own command — no `boards/*.yaml`, no `--board`.
+
+```bash
+apt-get install iverilog   # host-only simulation, always required (see below for --synthesize)
+python -m edgeforge convert-verilog \
+    --model examples/trained_models/iris_tree.pkl \
+    --out ./build/iris_tree_verilog --samples 20
+# model: 75 parameters
+# Verilog + testbench generated: ./build/iris_tree_verilog
+# == Icarus Verilog simulation (20 samples) ==
+# Verilog simulation (iverilog): 20/20 samples matched
+# convert-verilog: SUCCESS
+```
+
+Every op in `edgeforge/ir.py` is implemented, in two numeric domains:
+
+- **Classical tier** (`tree`/`linear`/`affine`/`activation`, i.e. sklearn
+  models, bare or scaler-folded) runs in Q16.16 fixed point
+  (`edgeforge/verilog/fixedpoint.py`): one shared signed 32-bit format, 16
+  fractional bits, for every value — no per-tensor scale bookkeeping needed.
+- **Deep tier** (`conv2d`/`depthwise_conv2d`/`maxpool2d`/int8 `linear`, i.e.
+  Keras/TFLite models) runs in the model's own int8/int32 TFLite
+  quantization, requantized between layers with an integer
+  multiply-then-shift (`edgeforge/verilog/quant_math.py`) — the classic
+  technique real quantized-NN hardware uses (and what TFLite Micro itself
+  falls back to without a float unit), since `convert-fpga`'s "the C codegen
+  can just use a plain float multiplier" shortcut isn't available here.
+
+Every node becomes its own small state machine (`IDLE` → run → `DONE`),
+chained by wiring node *k*'s `done` to node *k+1*'s `start` — one clock
+cycle per loop iteration (a MAC, a pooling comparison, ...), not pipelined.
+That's a deliberate priority: get an initial version that's provably
+correct, even at the cost of the cycle count a real deployment would want
+to optimize later.
+
+```bash
+python -m edgeforge convert-verilog \
+    --model examples/trained_models/iris_mlp.keras \
+    --out ./build/iris_mlp_verilog --samples 20
+# model: 67 parameters
+# Verilog simulation (iverilog): 20/20 samples matched
+# convert-verilog: SUCCESS
+```
+
+Pass `--synthesize` for real **Yosys → NextPNR-ECP5 → ecppack** synthesis
+(`--device`/`--package`/`--freq` select the target; default `45k`/
+`CABGA381`/12 MHz), gated on that toolchain being installed
+(`apt-get install yosys nextpnr-ecp5 fpga-trellis fpga-trellis-database` on
+Debian/Ubuntu) — missing it degrades the same way a missing cross-compiler
+does for any other board: source generated and host-verified, synthesis
+skipped, a clear install hint printed. When it *is* installed, the numbers
+are real: the tree example above synthesizes to 466 LUTs / 237 FFs / 0 DSPs
+and closes timing at ~62–73 MHz against a 12 MHz target on an LFE5U-45F.
+
+**Two honest limitations, both found by actually running the synthesis
+step, not by inspection:**
+
+1. **Every port is a flattened raw bus, with no pin-constraint (`.lpf`)
+   file** — real for correctness/timing/resource numbers, but every signal
+   lands on whatever pin NextPNR finds free. That's fine for "does this fit
+   and time-close"; a real deployment supplies its own `.lpf` and wires this
+   module to on-chip logic (UART/SPI/BRAM) rather than driving chip pins
+   directly.
+2. **A model with enough total input+output elements can need more I/O pins
+   than the target package has, and `--synthesize`'s place-and-route step
+   then fails outright** — not a resource problem (the actual compute logic
+   for the CNN example in [Examples](#examples) uses under 20% of an
+   LFE5U-45F's LUTs and 29% of its DSPs) but a pin-count one: that CNN's
+   flattened 8×8×1 input plus its output needs over 2000 I/O pins, and even
+   this backend's default package has 245. `convert-verilog` without
+   `--synthesize` is unaffected (host simulation never touches pins) — this
+   only blocks the optional real place-and-route step, and reports as a
+   clear, handled failure (`synth_ok=False`), not a crash.
+
+Also not done yet: VHDL output (Verilog only — Yosys reads it natively,
+VHDL needs the separate GHDL-Yosys plugin this doesn't set up); a deep-tier
+*regression* model's raw output isn't dequantized correctly for the
+host-side comparison (only its predicted *class*, an integer, is verified
+today — every deep-tier model tested so far is a classifier); and a
+streaming or memory-mapped I/O redesign that would let a bigger model's
+compute (which already fits comfortably) actually place-and-route on a
+small device.
+
 ## Scope and known limitations
 
 - **sklearn**: a bare fitted `DecisionTree*`/`LogisticRegression`/`MLP*`
@@ -478,6 +574,14 @@ board — synthesis stops at a resource report.
   only, host C-simulation only (no bitstream/board programming) — see
   [FPGA backend](#fpga-backend-convert-fpga-experimental) for why a
   `Softmax`-output model needs a looser `--tolerance` than the default.
+- **Verilog/Lattice (`convert-verilog`)**: every IR op is implemented, but a
+  model with enough total input+output elements can need more I/O pins than
+  the target package has, failing `--synthesize`'s place-and-route step
+  outright (not a correctness problem — see [Verilog/Lattice
+  backend](#veriloglattice-backend-convert-verilog-experimental)); a
+  deep-tier *regression* model's raw output isn't dequantized correctly for
+  the host-side comparison (classification is what's verified); Verilog
+  output only, no VHDL.
 - **Deep-tier requantization** uses a plain `float` multiplier rather than
   TFLite Micro's integer-only fixed-point-multiply-and-shift trick. Every
   deep-tier board in the registry has usable float (hardware FPU or
@@ -596,14 +700,21 @@ rejection on the download route, and skips cleanly if Flask isn't installed.
   library folder (vs. a flat sketch), and driving `arduino-cli upload` (device programming —
   including upload port autodetection — has no precedent anywhere else in EdgeForge, so it's
   deliberately left as a manual `arduino-cli upload`/Arduino IDE step for now).
-- **Phase 3**: an FPGA backend is partially built — `convert-fpga` wraps
-  hls4ml to turn a Keras model into an HLS project and host-verify it via
+- **Phase 3**: two initial FPGA backends. `convert-fpga` wraps hls4ml to
+  turn a Keras model into an HLS project and host-verify it via
   C-simulation, with best-effort real synthesis if Vivado HLS is installed
   (see [FPGA backend](#fpga-backend-convert-fpga-experimental)). Not yet
-  done: sklearn/ONNX → HLS ingest (Keras only so far), backends other than
-  Vivado, FINN integration (binary/extreme quantization), and anything past
-  a synthesis report — getting a bitstream onto a real board is still a
-  manual Vivado/Vitis step.
+  done there: sklearn/ONNX → HLS ingest (Keras only so far), backends other
+  than Vivado, FINN integration (binary/extreme quantization), and anything
+  past a synthesis report. `convert-verilog` generates Verilog directly for
+  the open-source Lattice ECP5 flow and covers every IR op (see
+  [Verilog/Lattice
+  backend](#veriloglattice-backend-convert-verilog-experimental)). Not yet
+  done there: a real board's pin-constraint file (every port is a raw
+  flattened bus today), an I/O architecture that scales past a small
+  device's pin count for a larger model, VHDL output, deep-tier regression
+  output dequantization, and any pipelining (one clock cycle per loop
+  iteration today, correctness-first).
 - **Phase 4**: a full hosted web front end (accounts, an upload *service*,
   training, a target picker) on top of this library. The `serve` command
   above is a basic single-user local UI added ahead of that — a thin layer

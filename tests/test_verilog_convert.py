@@ -1,10 +1,10 @@
-"""Verilog/Lattice backend (Phase 3, second FPGA backend): classical-tier (tree/linear/
-affine/activation) models compiled to synthesizable RTL by a from-scratch generator -- there's
-no existing "hls4ml for the open-source Lattice flow" tool to wrap (see
-edgeforge.verilog.convert's module docstring), so EdgeForge generates the RTL itself here, host
-verified via Icarus Verilog simulation against the real sklearn model. A deliberately separate
-path from `convert`/`--board`: no boards/*.yaml, no edgeforge.ir/edgeforge.codegen involvement,
-its own CLI subcommand.
+"""Verilog/Lattice backend (Phase 3, second FPGA backend): every op in edgeforge.ir.SUPPORTED_OPS
+compiled to synthesizable RTL by a from-scratch generator -- there's no existing "hls4ml for the
+open-source Lattice flow" tool to wrap (see edgeforge.verilog.convert's module docstring), so
+EdgeForge generates the RTL itself here, host verified via Icarus Verilog simulation against the
+real source model (sklearn's own predictions for the classical/Q16.16 tier, the real TFLite
+Interpreter for the deep/int8 tier). A deliberately separate path from `convert`/`--board`: no
+boards/*.yaml, no edgeforge.codegen involvement, its own CLI subcommand.
 """
 
 import shutil
@@ -13,8 +13,8 @@ import pytest
 
 from edgeforge.cli import main
 from edgeforge.errors import ToolchainNotFoundError, UnsupportedOpError
-from edgeforge.ingest import sklearn_ingest
-from edgeforge.verilog.codegen import validate_classical_tier
+from edgeforge.ingest import keras_ingest, sklearn_ingest
+from edgeforge.verilog.codegen import validate_codegen_support
 from edgeforge.verilog.convert import convert_and_validate
 from edgeforge.verilog.simulate import run_verilog_simulation
 
@@ -60,14 +60,46 @@ def test_mlp_matches_sklearn(mlp_clf_path, tmp_path):
     assert report.all_passed, report.describe()
 
 
-def test_deep_tier_node_rejected_with_a_clear_error(keras_mlp_path):
-    """conv2d/depthwise_conv2d/maxpool2d/int8-quantized linear aren't implemented in this
-    increment -- ingest must fail loudly and clearly, never silently emit wrong RTL."""
-    from edgeforge.ingest import keras_ingest
-
+@requires_iverilog
+def test_deep_mlp_matches_tflite_interpreter(keras_mlp_path, tmp_path):
+    """Exercises the deep (int8) tier's own linear op and integer requantization
+    (edgeforge/verilog/quant_math.py) against the real TFLite Interpreter, not the original
+    float Keras model -- the same reference every other deep-tier check in this project uses."""
     result = keras_ingest.ingest(keras_mlp_path, sample_range=(-2, 8))
-    with pytest.raises(UnsupportedOpError, match="classical tier"):
-        validate_classical_tier(result.ir)
+    assert result.ir.tensors[result.ir.nodes[0].attrs["weight"]].dtype == "int8"
+    report = run_verilog_simulation(result, tmp_path, n_samples=20, seed=0)
+    assert report.all_passed, report.describe()
+
+
+@requires_iverilog
+def test_deep_cnn_matches_tflite_interpreter(keras_cnn_path, tmp_path):
+    """Exercises conv2d, maxpool2d, and depthwise_conv2d together -- found and fixed two real
+    bugs building this: an 8-bit slice-assignment that dropped sign extension on every negative
+    int8 value, and depthwise_conv2d wrongly reusing plain conv2d's per-input-channel loop
+    (depthwise has none -- each output channel reads exactly one fixed input channel)."""
+    result = keras_ingest.ingest(keras_cnn_path, sample_range=(0.0, 1.0))
+    ops = [n.op for n in result.ir.nodes]
+    assert ops == ["conv2d", "maxpool2d", "depthwise_conv2d", "linear"]
+    report = run_verilog_simulation(result, tmp_path, n_samples=20, seed=0)
+    assert report.all_passed, report.describe()
+
+
+def test_transcendental_activation_rejected_with_a_clear_error():
+    """No EdgeForge backend emits a transcendental function (softmax/sigmoid/tanh) in hardware
+    -- reaching codegen with one is an ingest bug, not a model problem, and must fail loudly."""
+    from edgeforge.ir import ModelIR, Node, TensorSpec
+
+    x = TensorSpec("x", (2,), "float32", role="input")
+    ir = ModelIR(
+        kind="classical",
+        task="regression",
+        input_spec=x,
+        output_spec=x,  # the in-place activation's output IS the model's only tensor
+        tensors={"x": x},
+        nodes=[Node("activation", "act0", ["x"], ["x"], attrs={"kind": "sigmoid"})],
+    )
+    with pytest.raises(UnsupportedOpError, match="internal error"):
+        validate_codegen_support(ir)
 
 
 @requires_iverilog
@@ -108,8 +140,26 @@ def test_cli_convert_verilog_succeeds(tree_clf_path, tmp_path, capsys):
     assert "Icarus Verilog simulation" in out
 
 
-def test_cli_convert_verilog_rejects_deep_tier_cleanly(keras_mlp_path, tmp_path, capsys):
-    rc = main(["convert-verilog", "--model", str(keras_mlp_path), "--out", str(tmp_path)])
-    captured = capsys.readouterr()
-    assert rc == 1
-    assert "classical tier" in captured.err
+@requires_iverilog
+def test_cli_convert_verilog_succeeds_for_deep_tier(keras_mlp_path, tmp_path, capsys):
+    rc = main([
+        "convert-verilog", "--model", str(keras_mlp_path), "--out", str(tmp_path),
+        "--samples", "10",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "convert-verilog: SUCCESS" in out
+
+
+@requires_ecp5_toolchain
+def test_synthesize_reports_io_pin_exhaustion_cleanly(keras_cnn_path, tmp_path):
+    """A model with enough input+output elements needs more top-level I/O pins than a real
+    ECP5 package has (every port here is a raw flattened bus -- see convert.py's module
+    docstring) -- place-and-route genuinely can't succeed, and that must come back as a clear,
+    handled failure (synth_ok=False + a real error), never a crash, and never mistaken for a
+    correctness problem (simulation, which doesn't touch pins, is unaffected)."""
+    build_result = convert_and_validate(keras_cnn_path, tmp_path, n_samples=3, attempt_synthesis=True)
+    assert build_result.ok  # correctness is independent of whether it fits on this device
+    assert build_result.synth_attempted
+    assert not build_result.synth_ok
+    assert "place-and-route failed" in build_result.error

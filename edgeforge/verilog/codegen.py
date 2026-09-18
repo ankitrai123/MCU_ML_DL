@@ -1,9 +1,18 @@
-"""Renders synthesizable Verilog + a host-simulation testbench from a classical-tier ModelIR.
+"""Renders synthesizable Verilog + a host-simulation testbench from a ModelIR.
 
-Restricted, in this increment, to tree/linear(float32 weights)/affine -- exactly the ops the
-sklearn ingest path produces. A conv2d/depthwise_conv2d/maxpool2d/int8-quantized-linear node
-(the deep/TFLite tier) raises a clear error naming what's not supported yet, rather than
-silently emitting wrong RTL.
+Every op in edgeforge.ir.SUPPORTED_OPS is implemented: tree/linear(float32)/affine/activation
+in Q16.16 fixed point for the classical (sklearn) tier, and linear(int8)/conv2d/
+depthwise_conv2d/maxpool2d in plain int8/int32 with an integer multiply-shift requantization
+(edgeforge/verilog/quant_math.py) for the deep (TFLite) tier -- the same op set the C codegen
+supports, reusing the exact same ingest backends and IR, just emitting a different (HDL, not C)
+target language. An activation node needing a transcendental function (softmax/sigmoid/tanh)
+still can't be emitted in hardware by any EdgeForge backend and raises a clear error, exactly
+like the C codegen's own equivalent check.
+
+Known gap: a deep-tier *regression* model's output isn't dequantized correctly for the
+Python-side comparison (render_testbench/simulate.py only dequantize a classification model's
+predicted class, an integer, or a classical-tier Q16.16 regression output) -- every deep-tier
+model tested so far is a classifier, which doesn't exercise this path. See the README.
 """
 
 from __future__ import annotations
@@ -14,15 +23,16 @@ import numpy as np
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from edgeforge import __version__
+from edgeforge.codegen.quant_math import fused_activation_bounds
 from edgeforge.errors import UnsupportedOpError
-from edgeforge.ir import ModelIR
+from edgeforge.ir import ModelIR, quantize_affine
 from edgeforge.verilog import formatting
 from edgeforge.verilog.fixedpoint import fixed_literal, to_fixed_array, verilog_signed_literal
+from edgeforge.verilog.quant_math import requant_multipliers_for_node
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
-CLASSICAL_OPS = ("tree", "linear", "affine", "activation")
-_CLASSICAL_ACTIVATION_KINDS = ("relu", "relu6", "identity")
+_TRANSCENDENTAL_ACTIVATIONS = ("sigmoid", "tanh", "logistic", "softmax")
 
 
 def make_env() -> Environment:
@@ -37,53 +47,68 @@ def make_env() -> Environment:
         buf_name=formatting.buf_name,
         tensor_init_lines=formatting.tensor_init_lines,
         fixed_literal=fixed_literal,
+        verilog_signed_literal=verilog_signed_literal,
+        int_literal=lambda x: str(int(x)),
+        requant_multipliers_for_node=requant_multipliers_for_node,
+        fused_activation_bounds=fused_activation_bounds,
     )
     return env
 
 
-def validate_classical_tier(ir: ModelIR) -> None:
+def validate_codegen_support(ir: ModelIR) -> None:
     """Raises UnsupportedOpError naming exactly what's missing, rather than letting an
     unhandled node silently fall through Jinja2's StrictUndefined into a confusing template
-    error (or, worse, an empty/wrong RTL block)."""
+    error (or, worse, an empty/wrong RTL block). Every op in edgeforge.ir.SUPPORTED_OPS has a
+    real implementation here; the only remaining rejection (mirroring the C codegen's own) is
+    an activation that needs a transcendental function no EdgeForge backend emits in hardware."""
     for node in ir.nodes:
-        if node.op not in CLASSICAL_OPS:
+        if node.op == "activation" and node.attrs.get("kind") in _TRANSCENDENTAL_ACTIVATIONS:
             raise UnsupportedOpError(
-                f"node '{node.name}' (op={node.op!r}): the Verilog/Lattice backend's classical tier "
-                f"only supports {', '.join(CLASSICAL_OPS)} so far -- deep-tier ops "
-                "(conv2d/depthwise_conv2d/maxpool2d/int8-quantized linear/activation) aren't "
-                "implemented yet."
+                f"internal error: node '{node.name}' (activation kind={node.attrs['kind']!r}) reached "
+                "Verilog codegen without being elided or rejected at ingest -- this is an EdgeForge "
+                "bug, not a model problem; please report it."
             )
-        if node.op == "linear":
-            w = ir.tensors[node.attrs["weight"]]
-            if w.dtype != "float32":
+        if node.op == "maxpool2d":
+            # The pooling kernel passes raw quantized values straight through (max, or an
+            # integer average) with no rescale step -- only valid when input/output share
+            # quantization params, exactly the same invariant the C codegen checks (and relies
+            # on) for the same reason; see edgeforge/codegen/context.py's own copy of this check.
+            in_t = ir.tensors[node.inputs[0]]
+            out_t = ir.tensors[node.outputs[0]]
+            if in_t.scale != out_t.scale or in_t.zero_point != out_t.zero_point:
                 raise UnsupportedOpError(
-                    f"node '{node.name}': a quantized ({w.dtype}) linear layer isn't supported by "
-                    "the Verilog backend's classical tier yet -- only float32 (sklearn-style) "
-                    "linear layers are."
+                    f"internal error: pooling node '{node.name}' has mismatched input/output "
+                    f"quantization (in scale={in_t.scale} zp={in_t.zero_point}, "
+                    f"out scale={out_t.scale} zp={out_t.zero_point}); EdgeForge's pooling kernel "
+                    "assumes these match and doesn't rescale."
                 )
-        if node.op == "activation" and node.attrs.get("kind") not in _CLASSICAL_ACTIVATION_KINDS:
-            raise UnsupportedOpError(
-                f"node '{node.name}': activation kind {node.attrs.get('kind')!r} needs a "
-                f"transcendental function EdgeForge doesn't emit in hardware for any backend -- "
-                f"only {', '.join(_CLASSICAL_ACTIVATION_KINDS)} are supported."
-            )
 
 
 def render_model(ir: ModelIR, module_name: str = "model") -> str:
-    validate_classical_tier(ir)
+    validate_codegen_support(ir)
     env = make_env()
     ctx = {"ir": ir, "module_name": module_name, "edgeforge_version": __version__}
     return env.get_template("model.v.j2").render(**ctx)
 
 
+def _quantize_samples(ir: ModelIR, samples: np.ndarray) -> np.ndarray:
+    """Raw real-valued sample rows -> the same integer representation the generated RTL's
+    input port carries: Q16.16 for a float32 (classical-tier) input tensor, TFLite-style
+    int8 for a quantized (deep-tier) one -- so both the RTL and the Python-side reference
+    compare the exact same rounding of the exact same input."""
+    spec = ir.input_spec
+    if spec.dtype == "float32":
+        return to_fixed_array(samples)
+    scale, zero_point = spec.scale[0], spec.zero_point[0]
+    quantize = np.vectorize(lambda x: quantize_affine(float(x), scale, zero_point))
+    return quantize(samples).astype(np.int64)
+
+
 def render_testbench(ir: ModelIR, samples: np.ndarray, module_name: str = "model") -> str:
-    """`samples`: an (N, n_in) array of RAW (real-valued, not yet quantized) sample inputs --
-    quantized here, once, so both the RTL and the Python-side reference compare the exact
-    same Q16.16 rounding of the same input, the same way golden-vector validation compares
-    the exact same raw sample row against the reference model and the generated C."""
+    """`samples`: an (N, n_in) array of RAW (real-valued, not yet quantized) sample inputs."""
     env = make_env()
     n_samples, n_in = samples.shape
-    fixed = to_fixed_array(samples)
+    fixed = _quantize_samples(ir, samples)
     lines = [
         f"        ef_sample[{s * n_in + b}] = {verilog_signed_literal(int(fixed[s, b]))};"
         for s in range(n_samples)
