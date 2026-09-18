@@ -73,6 +73,23 @@ def build_parser() -> argparse.ArgumentParser:
     fpga.add_argument("--tolerance", type=float, default=0.05, help="max abs output difference allowed between the HLS C-simulation and the original Keras model (default: 0.05; loosen for lower precision, tighten for higher)")
     fpga.add_argument("--synthesize", action="store_true", help="also attempt real Vivado HLS synthesis (needs vivado_hls on PATH); without this flag, only the HLS project + host C-simulation verification run")
 
+    vlog = sub.add_parser(
+        "convert-verilog",
+        help="model -> synthesizable Verilog for the Lattice ECP5 family (experimental, Phase 3) -- "
+        "a from-scratch RTL generator (classical tier only so far: tree/linear/affine), "
+        "host-verified via Icarus Verilog simulation, synthesis is best-effort via Yosys/NextPNR. "
+        "A separate path from 'convert': no --board, no boards/*.yaml.",
+    )
+    vlog.add_argument("--model", required=True, type=Path, help="path to a trained model (.pkl/.pickle: sklearn tree/logistic-regression/scaler-pipeline only in this increment)")
+    vlog.add_argument("--out", required=True, type=Path, help="output directory for the generated Verilog + testbench (+ bitstream, if --synthesize)")
+    vlog.add_argument("--module-name", default="model", help="top-level Verilog module name (default: 'model')")
+    vlog.add_argument("--samples", type=int, default=20, help="number of Icarus Verilog simulation samples to check (default: 20)")
+    vlog.add_argument("--seed", type=int, default=0, help="RNG seed for simulation sample generation")
+    vlog.add_argument("--synthesize", action="store_true", help="also attempt real synthesis via Yosys + NextPNR-ECP5 + ecppack (needs that toolchain on PATH); without this flag, only the Verilog + host simulation verification run")
+    vlog.add_argument("--device", default="45k", choices=["12k", "25k", "45k", "85k", "um-25k", "um-45k", "um-85k", "um5g-25k", "um5g-45k", "um5g-85k"], help="ECP5 device size for --synthesize (default: 45k, i.e. LFE5U-45F)")
+    vlog.add_argument("--package", default="CABGA381", help="device package for --synthesize (default: CABGA381)")
+    vlog.add_argument("--freq", type=float, default=12.0, help="target clock frequency in MHz for --synthesize's timing check (default: 12)")
+
     return p
 
 
@@ -267,6 +284,53 @@ def cmd_convert_fpga(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_convert_verilog(args: argparse.Namespace) -> int:
+    from edgeforge.verilog.convert import convert_and_validate
+
+    print(f"== converting {args.model} to Verilog (module '{args.module_name}') ==")
+    try:
+        result = convert_and_validate(
+            args.model,
+            args.out,
+            module_name=args.module_name,
+            n_samples=args.samples,
+            seed=args.seed,
+            attempt_synthesis=args.synthesize,
+            device=args.device,
+            package=args.package,
+            freq_mhz=args.freq,
+        )
+    except EdgeForgeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"model: {result.param_count} parameters")
+    print(f"Verilog + testbench generated: {result.output_dir}")
+
+    print(f"\n== Icarus Verilog simulation ({args.samples} samples) ==")
+    print(result.simulation.describe())
+
+    if args.synthesize:
+        print(f"\n== ECP5 synthesis ({args.device}, {args.package}, {args.freq} MHz target) ==")
+        if result.toolchain_missing:
+            print(
+                f"toolchain '{result.toolchain_missing}' not found on this machine ({result.install_hint}); "
+                "Verilog generated and host-verified, but not synthesized"
+            )
+        elif result.synth_ok:
+            print(f"synthesis OK --\n{result.resource_report}")
+        else:
+            print(f"synthesis failed: {result.error}", file=sys.stderr)
+
+    print()
+    if result.ok:
+        note = "" if not args.synthesize or result.synth_ok else " (source generated + host-verified; synthesis not completed, see above)"
+        print(f"convert-verilog: SUCCESS{note}")
+        return 0
+    print("convert-verilog: FAILED (Verilog simulation diverged from the original model)", file=sys.stderr)
+    return 1
+
+
 def _load_rep_data(path: Path | None):
     if path is None:
         return None
@@ -288,6 +352,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(args)
     if args.command == "convert-fpga":
         return cmd_convert_fpga(args)
+    if args.command == "convert-verilog":
+        return cmd_convert_verilog(args)
     parser.print_help()
     return 1
 
