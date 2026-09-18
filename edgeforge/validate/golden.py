@@ -90,7 +90,12 @@ def run_golden_validation(
     ctx = build_context(ir, board, model_name)
     ctx["n_samples"] = n_samples
     ctx["rows"] = [[float_literal(v) for v in inputs[i]] for i in range(n_samples)]
-    golden_c_path = out_dir / "golden_test.c"
+    # Written next to model_c_path, not necessarily out_dir itself -- an arduino-cli board's
+    # model.c/model.h live one level down inside a sketch folder -- so golden_test.c's
+    # `#include "model.h"` resolves via the including file's own directory (a plain compiler
+    # rule), with no extra -I flag needed. A no-op path change for every other board, whose
+    # model.c already sits directly in out_dir.
+    golden_c_path = model_c_path.parent / "golden_test.c"
     golden_c_path.write_text(env.get_template("golden_test.c.j2").render(**ctx))
 
     build_res = build_host_executable([model_c_path, golden_c_path], out_dir, board, exe_name="golden_test")

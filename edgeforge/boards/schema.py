@@ -35,6 +35,12 @@ REQUIRED_TYPE_ROLES = (
 
 VALID_MODEL_TIERS = ("classical", "deep")
 VALID_OUTPUT_FORMATS = ("ihex", "binary", "none")
+# "raw": a direct cross-compiler invocation (compiler/compile_args/link_args/linker_script/
+# objcopy all apply) -- every board before the Arduino one used this and nothing else.
+# "arduino-cli": the board's own Arduino core owns the toolchain/startup/linking; EdgeForge
+# only drives `arduino-cli compile --fqbn ...` against a generated sketch directory, so
+# compile_args/link_args/linker_script/objcopy/needs_startup_stub go unused for this kind.
+VALID_TOOLCHAIN_KINDS = ("raw", "arduino-cli")
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,8 @@ class CDialect:
 @dataclass(frozen=True)
 class ToolchainProfile:
     compiler: str
+    kind: str = "raw"  # "raw" (direct cross-compiler) or "arduino-cli" -- see VALID_TOOLCHAIN_KINDS
+    fqbn: Optional[str] = None  # required when kind == "arduino-cli": the Arduino board id to compile against
     compile_args: tuple[str, ...] = ()
     link_args: tuple[str, ...] = ()
     linker_script: Optional[str] = None
@@ -216,8 +224,16 @@ def parse_board_profile(raw: dict, source_path: Path) -> BoardProfile:
         raise BoardError(
             f"{ctx}: toolchain.output_format must be one of {VALID_OUTPUT_FORMATS}, got {output_format!r}"
         )
+    kind = tc_raw.get("kind", "raw")
+    if kind not in VALID_TOOLCHAIN_KINDS:
+        raise BoardError(f"{ctx}: toolchain.kind must be one of {VALID_TOOLCHAIN_KINDS}, got {kind!r}")
+    fqbn = tc_raw.get("fqbn")
+    if kind == "arduino-cli" and not fqbn:
+        raise BoardError(f"{ctx}: toolchain.fqbn is required when toolchain.kind is 'arduino-cli'")
     toolchain = ToolchainProfile(
         compiler=_require(tc_raw, "compiler", f"{ctx} toolchain"),
+        kind=kind,
+        fqbn=fqbn,
         compile_args=tuple(tc_raw.get("compile_args", []) or []),
         link_args=tuple(tc_raw.get("link_args", []) or []),
         linker_script=tc_raw.get("linker_script"),

@@ -17,6 +17,11 @@ Op vocabulary
 ``depthwise_conv2d``  depthwise 2D convolution
 ``maxpool2d``   2D max pooling
 ``activation``  elementwise nonlinearity: relu | relu6 | sigmoid | tanh | identity
+``affine``      elementwise y = x*scale + shift, one (scale, shift) pair per input
+                 feature -- used to fold a fitted sklearn StandardScaler/MinMaxScaler
+                 into the generated C, so a raw (unscaled) sensor reading is normalized
+                 on-device exactly the way training data was, instead of requiring the
+                 caller to replicate that math by hand
 
 Reshape/flatten ops from the source graph are elided during ingest (the
 consuming node is rewired to read the pre-reshape tensor directly) since a
@@ -43,6 +48,7 @@ SUPPORTED_OPS = (
     "depthwise_conv2d",
     "maxpool2d",
     "activation",
+    "affine",
 )
 
 # dtype -> C storage size in bytes, used for footprint estimation.

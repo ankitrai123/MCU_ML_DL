@@ -7,8 +7,10 @@ board's toolchain happens to be installed — a compiled firmware image
 the original model.
 
 This is Phase 1: the conversion engine (library + CLI) for native/bare-metal
-microcontroller targets. A web front end, an Arduino CLI backend, and an FPGA
-backend are later phases — see [Roadmap](#roadmap).
+microcontroller targets, plus an initial Arduino CLI backend (compile-only —
+see [Arduino boards](#arduino-boards-arduino-cli)) for boards whose own core
+owns startup/linking. A full hosted web front end and an FPGA backend are
+later phases — see [Roadmap](#roadmap).
 
 ## Getting started — the easy way (no coding experience needed)
 
@@ -117,6 +119,8 @@ $ python -m edgeforge list-boards
 boards in /path/to/boards:
   8051_at89s52         AT89S52 (8051 core, 8KB flash / 256B RAM)
                        tier=classical  arch=mcs51            flash=8192B ram=256B compiler=sdcc
+  arduino_nano33_ble_sense_rev2 Arduino Nano 33 BLE Sense Rev2 (nRF52840, 1MB flash / 256KB RAM)
+                       tier=deep       arch=arm-cortex-m4    flash=1048576B ram=262144B compiler=arduino-cli
   esp32_native         ESP32 (Xtensa LX6, simplified single-region memory model)
                        tier=deep       arch=xtensa-lx6       flash=1048576B ram=327680B compiler=xtensa-esp32-elf-gcc
   native_cortex_m4     Native Cortex-M4 (generic 32-bit baseline)
@@ -180,6 +184,39 @@ sdcc --version
 `python -m edgeforge convert ...` (in your regular PowerShell/cmd, with
 Python already installed) will then find all three.
 
+### Arduino boards (arduino-cli)
+
+`arduino_nano33_ble_sense_rev2` works differently from every board above: instead of a raw
+cross-compiler invocation, EdgeForge generates an actual **Arduino sketch** (a `.ino` +
+`model.h`/`model.c` in their own folder, named `<model-name>_sketch/`) and drives
+[`arduino-cli`](https://arduino.github.io/arduino-cli/latest/) to compile it against that
+board's own core — the same core the Arduino IDE itself uses, so it owns startup code and
+linking instead of EdgeForge's generic linker script/startup stub.
+
+Install `arduino-cli` (see its [installation
+docs](https://arduino.github.io/arduino-cli/latest/installation/)), then install this
+board's core once:
+
+```bash
+arduino-cli core install arduino:mbed_nano
+```
+
+`python -m edgeforge convert --board arduino_nano33_ble_sense_rev2 ...` then compiles the
+generated sketch the same way every other board's `convert` compiles firmware — printing a
+clear "toolchain not found" message with that same install command if `arduino-cli` isn't on
+your PATH yet, rather than failing outright.
+
+**EdgeForge compiles the sketch; it does not upload it.** Once `convert` succeeds, flash the
+board yourself, either with the Arduino IDE (open the generated `.ino`, pick the board from
+the Boards Manager, click Upload) or with `arduino-cli` directly:
+
+```bash
+arduino-cli upload --fqbn arduino:mbed_nano:nano33ble --port <your-port> <out-dir>/model_sketch
+```
+
+(`arduino-cli board list` shows which `--port` your board enumerated as once it's plugged in
+over USB.)
+
 ### Web UI
 
 For end users who'd rather not use the CLI, `python -m edgeforge serve`
@@ -218,15 +255,21 @@ model file --[ingest]--> ModelIR --[footprint]--> gate --[codegen]--> C source -
   backend lowers into and every codegen template renders from: `TensorSpec`
   (a weight/bias/activation buffer, with quantization params when
   applicable) and `Node` (`tree`, `linear`, `conv2d`, `depthwise_conv2d`,
-  `maxpool2d`, `activation`). A decision tree and a quantized CNN are both
-  just a chain of these nodes; a `LogisticRegression` and one layer of a
-  quantized TFLite MLP are literally the same `linear` op, differing only in
-  the weight tensor's dtype.
+  `maxpool2d`, `activation`, `affine`). A decision tree and a quantized CNN
+  are both just a chain of these nodes; a `LogisticRegression` and one layer
+  of a quantized TFLite MLP are literally the same `linear` op, differing
+  only in the weight tensor's dtype. `affine` (`y = x*scale + shift`,
+  per-feature) is how a fitted sklearn scaler gets folded into the same
+  IR/codegen machinery — see the `sklearn_ingest.py` bullet below.
 
 - **`edgeforge/ingest/`** — one module per source format:
   - `sklearn_ingest.py`: `DecisionTreeClassifier`/`Regressor`,
-    `LogisticRegression`, `MLPClassifier`/`Regressor`. A bare fitted
-    estimator, not a `Pipeline` (pickle the final step instead).
+    `LogisticRegression`, `MLPClassifier`/`Regressor` — either bare, or
+    wrapped in a two-step `Pipeline(StandardScaler|MinMaxScaler,
+    <one of these>)`, in which case the fitted scaler is folded into the
+    generated C as a leading `affine` node instead of being dropped. Any
+    other `Pipeline` shape still needs the final estimator pickled by
+    itself, with the rest of the preprocessing folded into training by hand.
   - `keras_ingest.py`: `.h5`/`.keras` → `TFLiteConverter` post-training int8
     quantization → the *TFLite flatbuffer's own schema* (not the
     `Interpreter`'s private introspection or the CPU delegate's rewritten
@@ -258,12 +301,20 @@ model file --[ingest]--> ModelIR --[footprint]--> gate --[codegen]--> C source -
   that changes between an ARM board and the 8051 is which values
   `board.type_of(...)` and the storage-qualifier lookups return — literally
   the same `.j2` files, including the linker script template, render correct
-  output for a Cortex-M4 and an 8-bit MCS-51 core.
+  output for a Cortex-M4 and an 8-bit MCS-51 core. A board whose
+  `toolchain.kind` is `arduino-cli` renders `sketch.ino.j2` (`setup()`/`loop()`)
+  instead of `main.c.j2`/a linker script/a startup stub — `model.h.j2`/`model.c.j2`
+  render completely unchanged either way (an `extern "C"` guard in `model.h.j2`
+  is what keeps them safe to `#include` from a C++-compiled `.ino`).
 
 - **`edgeforge/build/toolchain.py`** — invokes the board's declared compiler
   (best-effort: reports exactly which toolchain is missing and how to
   install it if it isn't found) and, separately, the always-available host
-  compiler for the golden-vector harness.
+  compiler for the golden-vector harness. A `toolchain.kind: arduino-cli`
+  board dispatches to `arduino-cli compile --fqbn ... --build-path ...`
+  against the generated sketch directory instead — a structurally different
+  invocation (a sketch directory + a board id, not a compiler + flag list),
+  reusing the same missing-toolchain/`BuildResult` shape as every other board.
 
 - **`edgeforge/pipeline.py`** — orchestrates ingest → footprint → codegen →
   build → validate as one call returning a structured result (never raising
@@ -305,9 +356,10 @@ A board file declares:
 | `c_dialect.types` | the concrete C type for each of 8 logical roles (int8 weight, int32 bias/accumulator, the classical float type, loop-index type, ...) |
 | `c_dialect.rom_qualifier` / `rom_guard_macro` | an extra storage keyword for flash-resident const data (SDCC's `__code`) and the compiler-predefined macro that guards it — empty/`null` for a target where plain `const` + the linker script already places data in flash |
 | `toolchain` | compiler binary, flags, linker script template name, objcopy step (or none, for a compiler that emits the final format directly), and whether it needs a separate compile-then-link pass (SDCC can't take more than one source file per invocation) |
+| `toolchain.kind` | `raw` (default: the direct cross-compiler invocation above) or `arduino-cli` — see [Arduino boards](#arduino-boards-arduino-cli). An `arduino-cli` board sets `toolchain.fqbn` instead of `compile_args`/`link_args`/`linker_script`/`objcopy`, which go unused for it. |
 
-See any of the four shipped board files for a complete, commented example;
-`tests/test_add_board_no_code_changes.py` defines a brand-new board purely as
+See any of the five shipped board files for a complete, commented example;
+`tests/test_add_board_no_code_changes.py` defines a brand-new (`raw`-kind) board purely as
 YAML in a throwaway test directory and drives it through the full
 ingest → footprint → codegen → build → validate pipeline as the regression
 test for this claim.
@@ -315,10 +367,16 @@ test for this claim.
 ## Scope and known limitations
 
 - **sklearn**: a bare fitted `DecisionTree*`/`LogisticRegression`/`MLP*`
-  estimator. A `Pipeline` isn't ingested directly — extract the final
-  estimator and fold preprocessing into training. MLP hidden activations are
-  limited to `relu`/`identity`: `tanh`/`logistic` would need a math library,
-  which EdgeForge avoids linking so even the 8051 tier stays freestanding.
+  estimator, or that same estimator as the final step of a two-step
+  `Pipeline(StandardScaler|MinMaxScaler, <estimator>)` — the scaler is folded
+  into the generated C (see
+  [Handling a different sensor or train/deploy data mismatches](#handling-a-different-sensor-or-traindeploy-data-mismatches)).
+  Any other `Pipeline` shape (more preprocessing steps, a different
+  transformer such as `PCA`) isn't ingested directly — extract the final
+  estimator and fold that preprocessing into training instead. MLP hidden
+  activations are limited to `relu`/`identity`: `tanh`/`logistic` would need
+  a math library, which EdgeForge avoids linking so even the 8051 tier stays
+  freestanding.
 - **Keras/TFLite**: `FULLY_CONNECTED`, `CONV_2D`, `DEPTHWISE_CONV_2D`,
   `MAX_POOL_2D`, `AVERAGE_POOL_2D`, `SOFTMAX`, plus transparent
   reshape/flatten. No LSTM/attention/BatchNorm-as-its-own-op. A single-unit
@@ -345,10 +403,67 @@ test for this claim.
 - The generated `main.c` is a wiring demo (stubbed `read_sensor()` → quantize
   → `model_infer()` → a `volatile` result a debugger can observe) — replace
   `read_sensor()` and the result-handling with real driver code; don't edit
-  `model.c`/`model.h`.
+  `model.c`/`model.h`. The generated Arduino sketch (`arduino_nano33_ble_sense_rev2`)
+  is the same idea via `setup()`/`loop()` and `Serial.print()` instead.
+- **`arduino_nano33_ble_sense_rev2`'s `memory.flash_reserved_bytes`/`ram_reserved_bytes`**
+  are estimates for the Arduino Mbed OS core's own footprint, not measured against a real
+  `arduino-cli` build (unlike every other board's reserved headroom, which is a small,
+  well-understood vector-table-plus-stack allowance) — tighten them once you've compiled a
+  real sketch and checked its actual reported size.
 - `--sample-range` values with a negative lower bound need `=`, e.g.
   `--sample-range=-2,8` — otherwise argparse mistakes `-2,8` for another
   flag.
+
+## Handling a different sensor or train/deploy data mismatches
+
+Two related problems show up once a converted model meets real hardware:
+
+**1. Your training pipeline normalized its input, and the generated C didn't
+know.** If you trained on `scaler.transform(X)` output (e.g. via a
+`Pipeline(StandardScaler(), LogisticRegression())`) rather than raw feature
+values, the model only ever saw standardized numbers — feeding it a raw
+sensor reading at inference time produces meaningless predictions, even
+though the model itself converted without error. **This is now handled
+automatically**: pickle the whole `Pipeline` (not just the final estimator)
+and EdgeForge folds the fitted `StandardScaler`/`MinMaxScaler` into the
+generated C as an extra step that runs before inference, using the exact
+`mean_`/`scale_` (or `min_`/`data_range_`) values learned during training —
+see `examples/train_iris_logreg_scaled.py`. Feed `read_sensor()`'s raw output
+straight in; the generated code does the rescaling.
+
+**2. Your deployed sensor isn't the one you trained with.** Folding a scaler
+replays the *statistical* normalization training used — it can't fix a raw
+reading that means something physically different to begin with. If your
+training data came from one sensor (say a 10-bit ADC, 0–1023) and the board
+in the field has a different one (a 12-bit ADC, 0–4095, or a different
+sensitivity/units entirely), those raw numbers aren't on the same scale at
+all, scaler or no scaler. Fix this in `read_sensor()`, before any EdgeForge
+code runs: convert the new sensor's raw output into the same physical units
+your training sensor used. A two-point linear calibration is usually enough
+— read the new sensor at two known reference points and solve for
+`physical = raw * gain + offset`:
+
+```c
+/* Example: calibrated against two known reference readings. */
+#define SENSOR_GAIN   0.0244f   /* (ref2_physical - ref1_physical) / (ref2_raw - ref1_raw) */
+#define SENSOR_OFFSET (-1.2f)   /* ref1_physical - ref1_raw * SENSOR_GAIN */
+
+raw_out[i] = (float)adc_read(i) * SENSOR_GAIN + SENSOR_OFFSET;
+```
+
+Once `read_sensor()` produces values in the same physical units training
+data used, a folded scaler (if any) handles the rest.
+
+**3. Your training data doesn't represent real-world deployment
+conditions.** No code-gen step can fix this automatically — it's a data
+problem, not a conversion problem. If accuracy on the physical board is
+worse than what you saw training/testing in Python even after (1) and (2)
+are ruled out, capture a batch of real on-device sensor readings and compare
+their range against your training data's range (`edgeforge inspect --model
+...` prints the ingested model's structure, but eyeballing `X.min(axis=0)`/
+`X.max(axis=0)` on both datasets in Python is the direct check). If they
+diverge, retrain (or fine-tune) on data that includes real deployment
+conditions rather than trying to compensate for the gap on-device.
 
 ## Examples
 
@@ -359,6 +474,7 @@ test for this claim.
 |---|---|---|
 | `train_iris_tree.py` | `DecisionTreeClassifier` on iris | `8051_at89s52` |
 | `train_iris_logreg.py` | `LogisticRegression` on iris | `stm32f411` |
+| `train_iris_logreg_scaled.py` | `Pipeline(StandardScaler, LogisticRegression)` on iris | `stm32f411` (demonstrates folding a scaler into the generated C — see [Handling a different sensor or train/deploy data mismatches](#handling-a-different-sensor-or-traindeploy-data-mismatches)) |
 | `train_iris_mlp.py` | `MLPClassifier` on iris | `stm32f411` (too large for `8051_at89s52`'s 256B RAM — a real, instructive rejection) |
 | `train_keras_mlp.py` | small dense Keras MLP on iris | `stm32f411`, `native_cortex_m4`, or `esp32_native` (`--sample-range=-3,9`) |
 | `train_keras_cnn.py` | `Conv2D`→`MaxPool2D`→`DepthwiseConv2D`→`Dense` on a synthetic "which corner is the blob in" task | `stm32f411` or `native_cortex_m4` (`--sample-range=0,1`) |
@@ -382,8 +498,12 @@ rejection on the download route, and skips cleanly if Flask isn't installed.
 
 ## Roadmap (context only — not built in this phase)
 
-- **Phase 2**: an Arduino CLI backend — generate a sketch + library folder,
-  drive `arduino-cli compile`/`upload` headlessly.
+- **Phase 2**: the Arduino CLI backend is partially built — `arduino_nano33_ble_sense_rev2`
+  generates a sketch and drives `arduino-cli compile` (see
+  [Arduino boards](#arduino-boards-arduino-cli)). Not yet done: packaging as an installable
+  library folder (vs. a flat sketch), and driving `arduino-cli upload` (device programming —
+  including upload port autodetection — has no precedent anywhere else in EdgeForge, so it's
+  deliberately left as a manual `arduino-cli upload`/Arduino IDE step for now).
 - **Phase 3**: an FPGA backend for quantization-aware models, wrapping
   hls4ml/FINN rather than writing HLS generation from scratch.
 - **Phase 4**: a full hosted web front end (accounts, an upload *service*,

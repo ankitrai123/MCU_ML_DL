@@ -74,6 +74,9 @@ def build_firmware(generated: GeneratedFiles, board: BoardProfile) -> BuildResul
     if shutil.which(tc.compiler) is None:
         return BuildResult(success=False, toolchain_missing=tc.compiler, install_hint=tc.install_hint)
 
+    if tc.kind == "arduino-cli":
+        return _build_arduino_cli(generated, board)
+
     out_dir = generated.out_dir
     sources = generated.sources()
     log_parts: list[str] = []
@@ -129,6 +132,36 @@ def build_firmware(generated: GeneratedFiles, board: BoardProfile) -> BuildResul
     if result.returncode != 0:
         return BuildResult(success=False, log="\n".join(log_parts))
     return BuildResult(success=True, artifact_path=artifact_path, elf_path=None, log="\n".join(log_parts))
+
+
+def _build_arduino_cli(generated: GeneratedFiles, board: BoardProfile) -> BuildResult:
+    """Compiles the generated sketch directory with `arduino-cli compile` instead of a raw
+    cross-compiler invocation -- arduino-cli owns the actual toolchain, startup code, and
+    linking for the board's core, so unlike every branch in build_firmware() above, this
+    never reads tc.compile_args/link_args/linker_script/objcopy (all unused for this kind,
+    left at their "raw"-toolchain defaults in the board YAML)."""
+    tc = board.toolchain
+    sketch_dir = generated.sketch_ino.parent
+    build_dir = generated.out_dir / "arduino_build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [tc.compiler, "compile", "--fqbn", tc.fqbn, "--build-path", str(build_dir), str(sketch_dir)]
+    # A cold arduino-cli compile builds the entire Arduino core from scratch and routinely
+    # takes well over a minute -- longer than _run's normal 120s default.
+    result = _run(cmd, generated.out_dir, timeout=300)
+    log = _log(cmd, result)
+    if result.returncode != 0:
+        return BuildResult(success=False, log=log)
+
+    return BuildResult(success=True, artifact_path=_first_match(build_dir, ("*.bin", "*.hex", "*.elf")), log=log)
+
+
+def _first_match(directory: Path, patterns: tuple[str, ...]) -> Optional[Path]:
+    for pattern in patterns:
+        matches = sorted(directory.glob(pattern))
+        if matches:
+            return matches[0]
+    return None
 
 
 def build_host_executable(sources: list[Path], out_dir: Path, board: BoardProfile, exe_name: str = "a.out") -> BuildResult:

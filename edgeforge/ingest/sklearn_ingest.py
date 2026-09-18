@@ -1,8 +1,14 @@
 """scikit-learn pickle -> ModelIR.
 
 Supported estimators: DecisionTreeClassifier/Regressor, LogisticRegression,
-MLPClassifier/Regressor -- a bare fitted estimator, not a Pipeline (see
-UnsupportedModelError below for why, and the workaround).
+MLPClassifier/Regressor -- either a bare fitted estimator, or one wrapped in a
+two-step Pipeline(StandardScaler|MinMaxScaler, <one of the above>). A Pipeline
+shaped like that has its scaler folded into the generated C as a leading
+"affine" IR node (see edgeforge.ir's op vocabulary), so a raw, unscaled sensor
+reading gets normalized on-device exactly the way training data was, instead
+of the generated code silently expecting an already-scaled input. See
+UnsupportedModelError below for what other Pipeline shapes still need instead:
+extract the final estimator and fold that preprocessing into training by hand.
 
 Hidden-layer activations are limited to relu/relu6/identity: anything
 requiring a transcendental function (sigmoid/tanh/logistic) would need a math
@@ -26,6 +32,11 @@ from edgeforge.ir import ModelIR, Node, TensorSpec
 
 _SAFE_HIDDEN_ACTIVATIONS = {"relu", "identity"}
 _DEFAULT_SAMPLE_RANGE = (-3.0, 3.0)  # plausible range for standardized sklearn features
+_SUPPORTED_SCALER_NAMES = ("StandardScaler", "MinMaxScaler")
+_SUPPORTED_ESTIMATOR_NAMES = (
+    "DecisionTreeClassifier", "DecisionTreeRegressor",
+    "LogisticRegression", "MLPClassifier", "MLPRegressor",
+)
 
 
 def can_handle(path: Path) -> bool:
@@ -39,18 +50,15 @@ def _load(path: Path) -> Any:
 
 def ingest(path: Path, sample_range: tuple[float, float] | None = None) -> IngestResult:
     model = _load(path)
-    cls_name = type(model).__name__
     module_name = type(model).__module__
 
     if module_name.startswith("sklearn.pipeline"):
-        raise UnsupportedModelError(
-            f"'{path}' unpickles to a sklearn Pipeline, not a bare estimator. "
-            "EdgeForge Phase 1 ingests a single fitted estimator (DecisionTree, "
-            "LogisticRegression, or MLP). Pickle the final step instead, e.g. "
-            "pickle.dump(pipeline.named_steps['clf'], ...), and fold any preprocessing "
-            "(scaling, etc.) into training instead of shipping it as a runtime step."
-        )
+        return _ingest_pipeline(path, model, sample_range)
 
+    return _ingest_bare_estimator(path, model, type(model).__name__, module_name, sample_range)
+
+
+def _ingest_bare_estimator(path: Path, model: Any, cls_name: str, module_name: str, sample_range) -> IngestResult:
     if cls_name in ("DecisionTreeClassifier", "DecisionTreeRegressor"):
         return _ingest_tree(model, sample_range)
     if cls_name == "LogisticRegression":
@@ -60,8 +68,112 @@ def ingest(path: Path, sample_range: tuple[float, float] | None = None) -> Inges
 
     raise UnsupportedModelError(
         f"'{path}' unpickles to an unsupported estimator type '{module_name}.{cls_name}'. "
-        "EdgeForge's classical (sklearn) path supports: DecisionTreeClassifier, "
-        "DecisionTreeRegressor, LogisticRegression, MLPClassifier, MLPRegressor."
+        f"EdgeForge's classical (sklearn) path supports: {', '.join(_SUPPORTED_ESTIMATOR_NAMES)} "
+        "-- bare, or wrapped in a Pipeline(StandardScaler|MinMaxScaler, <one of these>)."
+    )
+
+
+def _ingest_pipeline(path: Path, pipeline: Any, sample_range: tuple[float, float] | None) -> IngestResult:
+    """Pipeline(StandardScaler|MinMaxScaler, <supported estimator>) -> IngestResult, with the
+    scaler folded into a leading "affine" IR node instead of being silently dropped. Any other
+    Pipeline shape raises UnsupportedModelError with the same manual-workaround guidance Phase 1
+    always gave: extract the final estimator, fold preprocessing into training by hand."""
+    steps = list(pipeline.steps)
+    if len(steps) != 2:
+        raise UnsupportedModelError(
+            f"'{path}' unpickles to a sklearn Pipeline with {len(steps)} step(s). EdgeForge only "
+            "folds a Pipeline shaped exactly (StandardScaler|MinMaxScaler, <estimator>) -- one "
+            "scaler followed by the final estimator -- into the generated C. Pickle the final "
+            "step instead, e.g. pickle.dump(pipeline.named_steps['clf'], ...), and fold any other "
+            "preprocessing into training."
+        )
+
+    (_, scaler), (_, estimator) = steps
+    scaler_cls, scaler_module = type(scaler).__name__, type(scaler).__module__
+    if not (scaler_module.startswith("sklearn.preprocessing") and scaler_cls in _SUPPORTED_SCALER_NAMES):
+        raise UnsupportedModelError(
+            f"'{path}' unpickles to a sklearn Pipeline whose first step is "
+            f"'{scaler_module}.{scaler_cls}', not a supported scaler. EdgeForge folds "
+            f"{' or '.join(_SUPPORTED_SCALER_NAMES)} into the generated C; other preprocessing "
+            "(PCA, feature selection, a custom transformer, ...) isn't supported -- fold it into "
+            "training and pickle a Pipeline of just a supported scaler + estimator (or the bare "
+            "fitted estimator) instead."
+        )
+
+    est_cls_name, est_module_name = type(estimator).__name__, type(estimator).__module__
+    if est_cls_name not in _SUPPORTED_ESTIMATOR_NAMES:
+        raise UnsupportedModelError(
+            f"'{path}' unpickles to a sklearn Pipeline whose final step is an unsupported "
+            f"estimator type '{est_module_name}.{est_cls_name}'. EdgeForge's classical (sklearn) "
+            f"path supports: {', '.join(_SUPPORTED_ESTIMATOR_NAMES)}."
+        )
+
+    n_features = int(scaler.n_features_in_)
+    scale, shift = _fuse_scaler(path, scaler)
+
+    result = _ingest_bare_estimator(path, estimator, est_cls_name, est_module_name, sample_range=None)
+    ir = result.ir
+
+    scale_name, shift_name, scaled_name = "scaler0_scale", "scaler0_shift", "scaler0_out"
+    ir.tensors[scale_name] = TensorSpec(scale_name, (n_features,), "float32", role="weight", data=scale)
+    ir.tensors[shift_name] = TensorSpec(shift_name, (n_features,), "float32", role="weight", data=shift)
+    ir.tensors[scaled_name] = TensorSpec(scaled_name, (n_features,), "float32", role="activation")
+    ir.nodes[0].inputs[0] = scaled_name  # the estimator's first node read "input" directly; now reads the scaled buffer
+    ir.nodes.insert(0, Node(
+        op="affine", name="scaler0",
+        inputs=["input"], outputs=[scaled_name],
+        attrs={"scale": scale_name, "shift": shift_name},
+    ))
+
+    def reference_fn(sample: np.ndarray):
+        x = sample.reshape(1, -1)
+        if ir.task == "classification":
+            proba = pipeline.predict_proba(x)[0]
+            return int(np.argmax(proba)), proba.astype(np.float32)
+        pred = np.atleast_1d(pipeline.predict(x)[0])
+        return None, pred.astype(np.float32)
+
+    return IngestResult(
+        ir=ir,
+        reference_fn=reference_fn,
+        input_sampler=_pipeline_sampler(scaler, n_features, sample_range),
+        source_kind="sklearn",
+    )
+
+
+def _fuse_scaler(path: Path, scaler: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Returns (scale, shift) such that scaler.transform(x) == x*scale + shift elementwise,
+    fusing sklearn's own fitted parameters into the single elementwise affine step the "affine"
+    IR op expects."""
+    if type(scaler).__name__ == "StandardScaler":
+        if scaler.mean_ is None or scaler.scale_ is None:
+            raise UnsupportedModelError(
+                f"'{path}': the Pipeline's StandardScaler was fit with with_mean=False or "
+                "with_std=False, so it isn't a full per-feature affine transform. EdgeForge "
+                "needs both centering and scaling enabled (StandardScaler's defaults)."
+            )
+        std = np.asarray(scaler.scale_, dtype=np.float64)
+        mean = np.asarray(scaler.mean_, dtype=np.float64)
+        return 1.0 / std, -mean / std
+    # MinMaxScaler already fits as X*scale_ + min_ -- see its own source/docstring.
+    return np.asarray(scaler.scale_, dtype=np.float64), np.asarray(scaler.min_, dtype=np.float64)
+
+
+def _pipeline_sampler(scaler: Any, n_features: int, sample_range: tuple[float, float] | None):
+    """Golden-vector sampling now needs to cover the *raw* sensor domain (whatever a real
+    board's read_sensor() produces), not the standardized/normalized domain
+    _DEFAULT_SAMPLE_RANGE describes -- so an explicit --sample-range is honored as-is (it now
+    describes the raw domain), and the default is instead derived per-feature from the fitted
+    scaler's own statistics, which is the best available guess at the real training-data range."""
+    if sample_range is not None:
+        lo, hi = sample_range
+        return uniform_range_sampler(np.full(n_features, lo), np.full(n_features, hi))
+    if type(scaler).__name__ == "StandardScaler":
+        mean = np.asarray(scaler.mean_, dtype=np.float64)
+        std = np.asarray(scaler.scale_, dtype=np.float64)
+        return uniform_range_sampler(mean - 3.0 * std, mean + 3.0 * std)
+    return uniform_range_sampler(
+        np.asarray(scaler.data_min_, dtype=np.float64), np.asarray(scaler.data_max_, dtype=np.float64)
     )
 
 

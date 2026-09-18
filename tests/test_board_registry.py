@@ -63,6 +63,53 @@ def test_missing_required_field_raises_board_error(tmp_path, missing_field):
         reg.get("broken")
 
 
+def test_boards_default_toolchain_kind_is_raw(boards_dir):
+    """Backward compatibility: a board YAML that never mentions toolchain.kind must still
+    parse as "raw", unchanged -- this field's addition must not silently alter any existing
+    board."""
+    stm32 = BoardRegistry(boards_dir).get("stm32f411")
+    assert stm32.toolchain.kind == "raw"
+    assert stm32.toolchain.fqbn is None
+
+
+def test_arduino_cli_kind_requires_fqbn(tmp_path):
+    import yaml
+
+    raw = {
+        "id": "broken", "bits": 32, "clock_hz": 1, "model_tier": "classical",
+        "memory": {"flash_bytes": 1024, "ram_bytes": 256},
+        "c_dialect": {"types": {
+            "weight_i8": "int8_t", "bias_i32": "int32_t", "activation_i8": "int8_t",
+            "quant_accum": "int32_t", "real": "float", "classical_accum": "float",
+            "index": "uint16_t", "class_index": "uint8_t",
+        }},
+        "toolchain": {"compiler": "arduino-cli", "kind": "arduino-cli"},  # no fqbn
+    }
+    (tmp_path / "broken.yaml").write_text(yaml.safe_dump(raw))
+    reg = BoardRegistry(tmp_path)
+    with pytest.raises(BoardError, match="fqbn"):
+        reg.get("broken")
+
+
+def test_unknown_toolchain_kind_raises(tmp_path):
+    import yaml
+
+    raw = {
+        "id": "broken", "bits": 32, "clock_hz": 1, "model_tier": "classical",
+        "memory": {"flash_bytes": 1024, "ram_bytes": 256},
+        "c_dialect": {"types": {
+            "weight_i8": "int8_t", "bias_i32": "int32_t", "activation_i8": "int8_t",
+            "quant_accum": "int32_t", "real": "float", "classical_accum": "float",
+            "index": "uint16_t", "class_index": "uint8_t",
+        }},
+        "toolchain": {"compiler": "gcc", "kind": "not_a_real_kind"},
+    }
+    (tmp_path / "broken.yaml").write_text(yaml.safe_dump(raw))
+    reg = BoardRegistry(tmp_path)
+    with pytest.raises(BoardError, match="toolchain.kind"):
+        reg.get("broken")
+
+
 def test_id_must_match_filename(tmp_path):
     import yaml
 

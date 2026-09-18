@@ -141,7 +141,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         return 1
 
     if result.generated:
-        names = [p.name for p in [result.generated.model_h, result.generated.model_c, result.generated.main_c, result.generated.linker_script, result.generated.startup_c] if p]
+        names = [p.name for p in [result.generated.model_h, result.generated.model_c, result.generated.main_c, result.generated.linker_script, result.generated.startup_c, result.generated.sketch_ino] if p]
         print(f"\n== generated C source into {args.out} ==")
         print("generated: " + ", ".join(names))
 

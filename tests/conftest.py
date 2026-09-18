@@ -45,6 +45,34 @@ def logreg_bin_path(tmp_path_factory, iris_data):
 
 
 @pytest.fixture(scope="session")
+def scaled_logreg_path(tmp_path_factory, iris_data):
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    X, y = iris_data
+    model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(max_iter=1000))]).fit(X, y)
+    path = tmp_path_factory.mktemp("models") / "scaled_logreg.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(model, f)
+    return path
+
+
+@pytest.fixture(scope="session")
+def scaled_tree_path(tmp_path_factory, iris_data):
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import MinMaxScaler
+    from sklearn.tree import DecisionTreeClassifier
+
+    X, y = iris_data
+    model = Pipeline([("scaler", MinMaxScaler()), ("clf", DecisionTreeClassifier(max_depth=4, random_state=0))]).fit(X, y)
+    path = tmp_path_factory.mktemp("models") / "scaled_tree.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(model, f)
+    return path
+
+
+@pytest.fixture(scope="session")
 def mlp_clf_path(tmp_path_factory, iris_data):
     from sklearn.neural_network import MLPClassifier
 
