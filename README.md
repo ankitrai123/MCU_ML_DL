@@ -17,7 +17,11 @@ later phases — see [Roadmap](#roadmap).
 This uses the point-and-click web page, not the command-line tool. You'll
 need a trained model file someone gave you (a `.pkl`, `.h5`, `.keras`, or
 `.onnx` file — this tool doesn't train models itself, it converts an
-already-trained one). Five steps, all one-time except the last:
+already-trained one). **Don't have one yet? See
+[TRAINING_A_MODEL.md](./TRAINING_A_MODEL.md)** for a from-scratch,
+no-ML-background walkthrough of training one in Python, using what data,
+and picking what settings — then come back here. Five steps, all one-time
+except the last:
 
 **1. Install Python** (skip if you already have it). Go to
 [python.org/downloads](https://www.python.org/downloads/) and download the
@@ -472,6 +476,7 @@ conditions rather than trying to compensate for the gap on-device.
 
 | Script | Model | Suggested board |
 |---|---|---|
+| `train_room_comfort.py` | `Pipeline(StandardScaler, LogisticRegression)` on a small CSV of temperature/humidity readings (`room_comfort.csv`) | `arduino_nano33_ble_sense_rev2` — the worked, step-by-step example in [TRAINING_A_MODEL.md](./TRAINING_A_MODEL.md), for anyone who doesn't have a trained model yet |
 | `train_iris_tree.py` | `DecisionTreeClassifier` on iris | `8051_at89s52` |
 | `train_iris_logreg.py` | `LogisticRegression` on iris | `stm32f411` |
 | `train_iris_logreg_scaled.py` | `Pipeline(StandardScaler, LogisticRegression)` on iris | `stm32f411` (demonstrates folding a scaler into the generated C — see [Handling a different sensor or train/deploy data mismatches](#handling-a-different-sensor-or-traindeploy-data-mismatches)) |
