@@ -20,6 +20,13 @@ typedef {{ output_ctype }} model_output_t;
 typedef {{ class_ctype }} model_class_t;
 {% endif %}
 
+#ifdef __cplusplus
+/* model.c is always compiled as C (its own .c extension forces that even from a C++ build
+ * system), so a C++ caller -- e.g. an Arduino .ino, which the toolchain compiles as C++ --
+ * needs this guard or the linker won't find model_infer under its unmangled C name. */
+extern "C" {
+#endif
+
 /* Runs inference on one input vector.
  * output[] always holds real-valued (dequantized, for a quantized model) scores,
  * one per output element -- MODEL_NUM_CLASSES of them for a classifier, MODEL_OUTPUT_SIZE
@@ -35,5 +42,9 @@ void model_infer(
     , model_class_t *predicted_class
 {% endif %}
 );
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* EDGEFORGE_{{ model_name | upper }}_H */

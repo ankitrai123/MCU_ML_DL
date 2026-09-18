@@ -20,6 +20,9 @@ def test_generate_produces_expected_files(tree_clf_path, boards_dir, tmp_path):
     assert gen.main_c.is_file()
     assert gen.linker_script.is_file()
     assert gen.startup_c.is_file()
+    # extern "C" guard: model.h must stay safely includable from a C++ translation unit
+    # (e.g. an Arduino .ino) even for a board that isn't itself an Arduino board.
+    assert 'extern "C"' in gen.model_h.read_text()
 
 
 def test_generate_8051_has_no_linker_script_or_startup(tree_clf_path, boards_dir, tmp_path):

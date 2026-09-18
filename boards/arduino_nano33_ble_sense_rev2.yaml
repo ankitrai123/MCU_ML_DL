@@ -1,0 +1,62 @@
+# Arduino Nano 33 BLE Sense Rev2 -- Nordic nRF52840 (Cortex-M4F, 1MB flash, 256KB RAM).
+# https://docs.arduino.cc/hardware/nano-33-ble-sense-rev2/
+#
+# Unlike every other board here, this one is NOT compiled with a direct arm-none-eabi-gcc
+# invocation: toolchain.kind is "arduino-cli", so EdgeForge generates an Arduino *sketch*
+# (a .ino + model.h/model.c in their own folder) and drives `arduino-cli compile --fqbn ...`
+# against it. Arduino's own "Arduino Mbed OS Nano Boards" core owns startup code and linking
+# for this path, which is why compile_args/link_args/linker_script/objcopy/needs_startup_stub
+# are all left at their unused "raw"-toolchain defaults below -- see toolchain.kind's comment
+# in edgeforge/boards/schema.py.
+id: arduino_nano33_ble_sense_rev2
+name: "Arduino Nano 33 BLE Sense Rev2 (nRF52840, 1MB flash / 256KB RAM)"
+architecture: arm-cortex-m4
+bits: 32
+endianness: little
+clock_hz: 64000000
+
+# 256KB RAM comfortably fits either a classical or a quantized deep model.
+model_tier: deep
+
+memory:
+  flash_bytes: 1048576     # 1 MB
+  ram_bytes: 262144        # 256 KB
+  # Headroom for the Arduino Mbed OS core itself, which -- unlike a bare-metal board's vector
+  # table + stack -- is a real (if small) RTOS that owns a meaningful chunk of both flash and
+  # RAM before your model ever runs. These are conservative estimates, not measured against a
+  # real arduino-cli build (arduino-cli isn't available in every dev environment); tighten
+  # them once you've compiled a real sketch and checked its actual reported size.
+  flash_reserved_bytes: 196608   # 192 KB
+  ram_reserved_bytes: 49152      # 48 KB
+
+c_dialect:
+  types:
+    weight_i8: int8_t
+    bias_i32: int32_t
+    activation_i8: int8_t
+    quant_accum: int32_t
+    real: float
+    classical_accum: float
+    index: uint16_t
+    class_index: uint8_t
+  rom_qualifier: ""              # plain C -- model.h/model.c are ordinary translation units
+                                  # inside the sketch folder, no vendor storage-class keyword
+  rom_guard_macro: null
+  ram_qualifier: ""
+  ram_guard_macro: null
+  function_attributes: ""
+  extra_includes: []
+
+toolchain:
+  kind: arduino-cli
+  compiler: arduino-cli                # also what `shutil.which()` checks to detect it's installed
+  fqbn: "arduino:mbed_nano:nano33ble"   # same FQBN for Rev1 and Rev2 -- the sensor differences
+                                        # between revisions are different onboard-sensor *libraries*
+                                        # (e.g. Arduino_BMI270_BMM150 vs Arduino_LSM9DS1), not a
+                                        # different core/FQBN
+  install_hint: "Install arduino-cli (https://arduino.github.io/arduino-cli/latest/installation/), then: arduino-cli core install arduino:mbed_nano"
+
+host_test:
+  compiler: gcc
+  compile_args: ["-std=c99", "-O2", "-Wall"]
+  link_args: ["-lm"]
