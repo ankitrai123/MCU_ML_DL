@@ -209,6 +209,19 @@
     }
 {% endmacro %}
 
+{% macro emit_affine(node, ir, board, index_ctype) %}
+{% set scale = ir.tensors[node.attrs.scale] %}
+{% set shift = ir.tensors[node.attrs.shift] %}
+{% set in_t = ir.tensors[node.inputs[0]] %}
+{% set out_t = ir.tensors[node.outputs[0]] %}
+    {
+        {{ index_ctype }} ef_i;
+        for (ef_i = 0; ef_i < {{ scale.size }}; ef_i++) {
+            {{ tensor_ref(out_t, ir) }}[ef_i] = {{ flat_ref(in_t, ir, board.type_of('real')) }}[ef_i] * {{ buf_name(scale.name) }}[ef_i] + {{ buf_name(shift.name) }}[ef_i];
+        }
+    }
+{% endmacro %}
+
 {% macro emit_node(node, ir, board, index_ctype) %}
 {% if node.op == 'tree' %}
 {{ emit_tree(node, ir, board, index_ctype) }}
@@ -222,5 +235,7 @@
 {{ emit_pool2d(node, ir, board, index_ctype) }}
 {% elif node.op == 'activation' %}
 {{ emit_activation(node, ir, board, index_ctype) }}
+{% elif node.op == 'affine' %}
+{{ emit_affine(node, ir, board, index_ctype) }}
 {% endif %}
 {% endmacro %}

@@ -218,15 +218,21 @@ model file --[ingest]--> ModelIR --[footprint]--> gate --[codegen]--> C source -
   backend lowers into and every codegen template renders from: `TensorSpec`
   (a weight/bias/activation buffer, with quantization params when
   applicable) and `Node` (`tree`, `linear`, `conv2d`, `depthwise_conv2d`,
-  `maxpool2d`, `activation`). A decision tree and a quantized CNN are both
-  just a chain of these nodes; a `LogisticRegression` and one layer of a
-  quantized TFLite MLP are literally the same `linear` op, differing only in
-  the weight tensor's dtype.
+  `maxpool2d`, `activation`, `affine`). A decision tree and a quantized CNN
+  are both just a chain of these nodes; a `LogisticRegression` and one layer
+  of a quantized TFLite MLP are literally the same `linear` op, differing
+  only in the weight tensor's dtype. `affine` (`y = x*scale + shift`,
+  per-feature) is how a fitted sklearn scaler gets folded into the same
+  IR/codegen machinery — see the `sklearn_ingest.py` bullet below.
 
 - **`edgeforge/ingest/`** — one module per source format:
   - `sklearn_ingest.py`: `DecisionTreeClassifier`/`Regressor`,
-    `LogisticRegression`, `MLPClassifier`/`Regressor`. A bare fitted
-    estimator, not a `Pipeline` (pickle the final step instead).
+    `LogisticRegression`, `MLPClassifier`/`Regressor` — either bare, or
+    wrapped in a two-step `Pipeline(StandardScaler|MinMaxScaler,
+    <one of these>)`, in which case the fitted scaler is folded into the
+    generated C as a leading `affine` node instead of being dropped. Any
+    other `Pipeline` shape still needs the final estimator pickled by
+    itself, with the rest of the preprocessing folded into training by hand.
   - `keras_ingest.py`: `.h5`/`.keras` → `TFLiteConverter` post-training int8
     quantization → the *TFLite flatbuffer's own schema* (not the
     `Interpreter`'s private introspection or the CPU delegate's rewritten
@@ -315,10 +321,16 @@ test for this claim.
 ## Scope and known limitations
 
 - **sklearn**: a bare fitted `DecisionTree*`/`LogisticRegression`/`MLP*`
-  estimator. A `Pipeline` isn't ingested directly — extract the final
-  estimator and fold preprocessing into training. MLP hidden activations are
-  limited to `relu`/`identity`: `tanh`/`logistic` would need a math library,
-  which EdgeForge avoids linking so even the 8051 tier stays freestanding.
+  estimator, or that same estimator as the final step of a two-step
+  `Pipeline(StandardScaler|MinMaxScaler, <estimator>)` — the scaler is folded
+  into the generated C (see
+  [Handling a different sensor or train/deploy data mismatches](#handling-a-different-sensor-or-traindeploy-data-mismatches)).
+  Any other `Pipeline` shape (more preprocessing steps, a different
+  transformer such as `PCA`) isn't ingested directly — extract the final
+  estimator and fold that preprocessing into training instead. MLP hidden
+  activations are limited to `relu`/`identity`: `tanh`/`logistic` would need
+  a math library, which EdgeForge avoids linking so even the 8051 tier stays
+  freestanding.
 - **Keras/TFLite**: `FULLY_CONNECTED`, `CONV_2D`, `DEPTHWISE_CONV_2D`,
   `MAX_POOL_2D`, `AVERAGE_POOL_2D`, `SOFTMAX`, plus transparent
   reshape/flatten. No LSTM/attention/BatchNorm-as-its-own-op. A single-unit
@@ -350,6 +362,57 @@ test for this claim.
   `--sample-range=-2,8` — otherwise argparse mistakes `-2,8` for another
   flag.
 
+## Handling a different sensor or train/deploy data mismatches
+
+Two related problems show up once a converted model meets real hardware:
+
+**1. Your training pipeline normalized its input, and the generated C didn't
+know.** If you trained on `scaler.transform(X)` output (e.g. via a
+`Pipeline(StandardScaler(), LogisticRegression())`) rather than raw feature
+values, the model only ever saw standardized numbers — feeding it a raw
+sensor reading at inference time produces meaningless predictions, even
+though the model itself converted without error. **This is now handled
+automatically**: pickle the whole `Pipeline` (not just the final estimator)
+and EdgeForge folds the fitted `StandardScaler`/`MinMaxScaler` into the
+generated C as an extra step that runs before inference, using the exact
+`mean_`/`scale_` (or `min_`/`data_range_`) values learned during training —
+see `examples/train_iris_logreg_scaled.py`. Feed `read_sensor()`'s raw output
+straight in; the generated code does the rescaling.
+
+**2. Your deployed sensor isn't the one you trained with.** Folding a scaler
+replays the *statistical* normalization training used — it can't fix a raw
+reading that means something physically different to begin with. If your
+training data came from one sensor (say a 10-bit ADC, 0–1023) and the board
+in the field has a different one (a 12-bit ADC, 0–4095, or a different
+sensitivity/units entirely), those raw numbers aren't on the same scale at
+all, scaler or no scaler. Fix this in `read_sensor()`, before any EdgeForge
+code runs: convert the new sensor's raw output into the same physical units
+your training sensor used. A two-point linear calibration is usually enough
+— read the new sensor at two known reference points and solve for
+`physical = raw * gain + offset`:
+
+```c
+/* Example: calibrated against two known reference readings. */
+#define SENSOR_GAIN   0.0244f   /* (ref2_physical - ref1_physical) / (ref2_raw - ref1_raw) */
+#define SENSOR_OFFSET (-1.2f)   /* ref1_physical - ref1_raw * SENSOR_GAIN */
+
+raw_out[i] = (float)adc_read(i) * SENSOR_GAIN + SENSOR_OFFSET;
+```
+
+Once `read_sensor()` produces values in the same physical units training
+data used, a folded scaler (if any) handles the rest.
+
+**3. Your training data doesn't represent real-world deployment
+conditions.** No code-gen step can fix this automatically — it's a data
+problem, not a conversion problem. If accuracy on the physical board is
+worse than what you saw training/testing in Python even after (1) and (2)
+are ruled out, capture a batch of real on-device sensor readings and compare
+their range against your training data's range (`edgeforge inspect --model
+...` prints the ingested model's structure, but eyeballing `X.min(axis=0)`/
+`X.max(axis=0)` on both datasets in Python is the direct check). If they
+diverge, retrain (or fine-tune) on data that includes real deployment
+conditions rather than trying to compensate for the gap on-device.
+
 ## Examples
 
 `examples/` trains small demo models and saves them to
@@ -359,6 +422,7 @@ test for this claim.
 |---|---|---|
 | `train_iris_tree.py` | `DecisionTreeClassifier` on iris | `8051_at89s52` |
 | `train_iris_logreg.py` | `LogisticRegression` on iris | `stm32f411` |
+| `train_iris_logreg_scaled.py` | `Pipeline(StandardScaler, LogisticRegression)` on iris | `stm32f411` (demonstrates folding a scaler into the generated C — see [Handling a different sensor or train/deploy data mismatches](#handling-a-different-sensor-or-traindeploy-data-mismatches)) |
 | `train_iris_mlp.py` | `MLPClassifier` on iris | `stm32f411` (too large for `8051_at89s52`'s 256B RAM — a real, instructive rejection) |
 | `train_keras_mlp.py` | small dense Keras MLP on iris | `stm32f411`, `native_cortex_m4`, or `esp32_native` (`--sample-range=-3,9`) |
 | `train_keras_cnn.py` | `Conv2D`→`MaxPool2D`→`DepthwiseConv2D`→`Dense` on a synthetic "which corner is the blob in" task | `stm32f411` or `native_cortex_m4` (`--sample-range=0,1`) |
