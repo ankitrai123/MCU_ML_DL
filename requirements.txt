@@ -22,3 +22,8 @@ pytest>=7.0
 
 # Basic local web UI (`python -m edgeforge serve`)
 flask>=3.0
+
+# FPGA backend (`python -m edgeforge convert-fpga`, Phase 3, experimental) -- also needs
+# tensorflow-cpu above to load the source Keras model; real synthesis (--synthesize)
+# additionally needs Xilinx Vivado HLS/Vitis HLS installed separately (not on PyPI)
+hls4ml>=1.0

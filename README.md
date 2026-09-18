@@ -9,8 +9,10 @@ the original model.
 This is Phase 1: the conversion engine (library + CLI) for native/bare-metal
 microcontroller targets, plus an initial Arduino CLI backend (compile-only —
 see [Arduino boards](#arduino-boards-arduino-cli)) for boards whose own core
-owns startup/linking. A full hosted web front end and an FPGA backend are
-later phases — see [Roadmap](#roadmap).
+owns startup/linking, and an initial FPGA backend (`convert-fpga`, a
+deliberately separate command — see [FPGA backend](#fpga-backend-convert-fpga-experimental))
+wrapping hls4ml. A full hosted web front end is a later phase — see
+[Roadmap](#roadmap).
 
 ## Getting started — the easy way (no coding experience needed)
 
@@ -368,6 +370,87 @@ YAML in a throwaway test directory and drives it through the full
 ingest → footprint → codegen → build → validate pipeline as the regression
 test for this claim.
 
+## FPGA backend (`convert-fpga`, experimental)
+
+Every board and command above shares one pipeline — `ingest → footprint →
+codegen → build → validate` (see [Architecture](#architecture)) — driven by
+`edgeforge convert --board <id>`. The FPGA backend deliberately isn't part
+of that: there's no `boards/*.yaml` entry, no `--board` flag, and
+`edgeforge/ir.py`/`edgeforge/codegen/` are never involved. Instead,
+`convert-fpga` is its own command, a thin wrapper around
+[hls4ml](https://fastmachinelearning.org/hls4ml/), which does its own,
+independent conversion straight from a Keras model into synthesizable HLS
+C++ — a fundamentally different kind of output (a hardware description, not
+a CPU program) from anything `convert` generates.
+
+```bash
+pip install hls4ml tensorflow-cpu   # or: pip install -e .[fpga]
+python -m edgeforge convert-fpga \
+    --model examples/trained_models/iris_mlp.keras \
+    --out ./build/iris_mlp_hls \
+    --sample-range 0,1 --tolerance 0.2
+```
+
+(`--tolerance 0.2` here, looser than the `0.05` default — see why below.)
+
+This always does two things, and stops there unless you ask for more:
+
+1. **Generates the HLS project** (`hmodel.write()`) — a folder of HLS C++
+   ready to open in Vivado HLS/Vitis HLS, targeting a Zynq-7020 part by
+   default (`--part`, e.g. for a PYNQ-Z2/Zybo Z7-20).
+2. **Validates it on the host**, with no FPGA toolchain involved: hls4ml
+   compiles its own C-simulation with a plain `g++` and runs it against N
+   random input samples, comparing the result against the original Keras
+   model's own predictions. This is the same guarantee golden-vector
+   validation gives every MCU board — proof the generated output actually
+   matches the source model — aimed at hls4ml's csim instead of a
+   cross-compiled `model.c`. `convert-fpga` reports SUCCESS/FAILED from this
+   check alone; nothing here ever touches real hardware.
+
+Pass `--synthesize` to also attempt **real Vivado HLS synthesis**
+(`hmodel.build()`) for actual LUT/FF/DSP/BRAM numbers. This needs Xilinx
+Vivado HLS/Vitis HLS installed with `vivado_hls` on `PATH` — exactly like a
+missing cross-compiler for any other board, a missing `vivado_hls` prints an
+install hint and reports the HLS project as generated-and-host-verified but
+not synthesized, rather than failing the whole command.
+
+**A `Softmax` output needs a looser `--tolerance` than the default.**
+`--tolerance` (default `0.05`) is the max absolute difference allowed
+against the original Keras model's own output, checked at this backend's
+default `--precision fixed<16,6>`. Run the walkthrough above *without* the
+`--tolerance 0.2` override and, on one real run, it genuinely fails:
+
+```
+HLS C-simulation validation: 14/20 samples within tolerance (0.05)
+  sample 8: max abs diff 0.07568 exceeds tolerance
+  sample 11: max abs diff 0.07224 exceeds tolerance
+  ...
+convert-fpga: FAILED (C-simulation diverged from the original model)
+```
+
+The cause is specifically `Softmax`, not general fixed-point rounding —
+confirmed by elimination, not assumed: a same-sized model with a plain
+linear (regression) output instead of `Softmax` held comfortably under the
+`0.05` default across several retrains (worst case observed: ~0.014), while
+a `Softmax`-output model like this one did not (worst case observed:
+~0.13) — including when inputs were drawn from the exact `[0,1]`
+distribution it trained on, ruling out an input-range mismatch as the
+cause, and including at `fixed<20,10>`/`fixed<24,10>` (more bits than the
+default), ruling out precision width too. hls4ml's `Softmax` uses a
+table-based approximation whose own resolution is the real bottleneck. In
+practice this matters less than it sounds: a few percent of absolute error
+in a softmax probability essentially never changes which class scores
+highest, so a looser `--tolerance` (as used above) is a reasonable choice
+for a classification model — this backend just has no way to know that on
+its own, since (unlike `edgeforge inspect`/`convert`) it never inspects the
+model beyond its input shape and parameter count, so it always compares raw
+output values rather than predicted classes.
+
+What this backend does not do (see [Roadmap](#roadmap) for Phase 3's
+status): ingest anything but a Keras model (no sklearn/ONNX → HLS path),
+target any hls4ml backend but Vivado, or produce a bitstream/program a real
+board — synthesis stops at a resource report.
+
 ## Scope and known limitations
 
 - **sklearn**: a bare fitted `DecisionTree*`/`LogisticRegression`/`MLP*`
@@ -391,6 +474,10 @@ test for this claim.
   for ONNX in this phase (it would need ONNX→TF→TFLite, a fragile multi-hop
   conversion this phase doesn't need for MLP coverage); ONNX models render
   through the classical (float32) codegen path.
+- **FPGA (`convert-fpga`)**: Keras models only, hls4ml's Vivado backend
+  only, host C-simulation only (no bitstream/board programming) — see
+  [FPGA backend](#fpga-backend-convert-fpga-experimental) for why a
+  `Softmax`-output model needs a looser `--tolerance` than the default.
 - **Deep-tier requantization** uses a plain `float` multiplier rather than
   TFLite Micro's integer-only fixed-point-multiply-and-shift trick. Every
   deep-tier board in the registry has usable float (hardware FPU or
@@ -509,8 +596,14 @@ rejection on the download route, and skips cleanly if Flask isn't installed.
   library folder (vs. a flat sketch), and driving `arduino-cli upload` (device programming —
   including upload port autodetection — has no precedent anywhere else in EdgeForge, so it's
   deliberately left as a manual `arduino-cli upload`/Arduino IDE step for now).
-- **Phase 3**: an FPGA backend for quantization-aware models, wrapping
-  hls4ml/FINN rather than writing HLS generation from scratch.
+- **Phase 3**: an FPGA backend is partially built — `convert-fpga` wraps
+  hls4ml to turn a Keras model into an HLS project and host-verify it via
+  C-simulation, with best-effort real synthesis if Vivado HLS is installed
+  (see [FPGA backend](#fpga-backend-convert-fpga-experimental)). Not yet
+  done: sklearn/ONNX → HLS ingest (Keras only so far), backends other than
+  Vivado, FINN integration (binary/extreme quantization), and anything past
+  a synthesis report — getting a bitstream onto a real board is still a
+  manual Vivado/Vitis step.
 - **Phase 4**: a full hosted web front end (accounts, an upload *service*,
   training, a target picker) on top of this library. The `serve` command
   above is a basic single-user local UI added ahead of that — a thin layer

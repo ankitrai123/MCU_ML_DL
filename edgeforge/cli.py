@@ -55,6 +55,24 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument("--port", type=int, default=5000)
     srv.add_argument("--debug", action="store_true", help="enable Flask's debug/reloader mode (development only)")
 
+    fpga = sub.add_parser(
+        "convert-fpga",
+        help="Keras model -> FPGA-targeted HLS project via hls4ml (experimental, Phase 3) -- "
+        "host-verified, synthesis is best-effort and needs Vivado HLS. A separate path from "
+        "'convert': no --board, no boards/*.yaml.",
+    )
+    fpga.add_argument("--model", required=True, type=Path, help="path to a trained Keras model (.h5/.keras)")
+    fpga.add_argument("--out", required=True, type=Path, help="output directory for the generated HLS project")
+    fpga.add_argument("--part", default="xc7z020clg400-1", help="target FPGA part (default: Zynq-7020, as used on the PYNQ-Z2/Zybo Z7-20)")
+    fpga.add_argument("--backend", default="Vivado", help="hls4ml backend (default: Vivado)")
+    fpga.add_argument("--precision", default="fixed<16,6>", help="default fixed-point precision for weights/activations (default: fixed<16,6>)")
+    fpga.add_argument("--reuse-factor", type=int, default=1, help="hls4ml reuse factor: higher trades latency/throughput for fewer resources (default: 1)")
+    fpga.add_argument("--sample-range", type=str, default=None, metavar="LO,HI", help="input sampling range for C-simulation verification (default: 0,1)")
+    fpga.add_argument("--samples", type=int, default=20, help="number of C-simulation verification samples (default: 20)")
+    fpga.add_argument("--seed", type=int, default=0, help="RNG seed for verification sample generation")
+    fpga.add_argument("--tolerance", type=float, default=0.05, help="max abs output difference allowed between the HLS C-simulation and the original Keras model (default: 0.05; loosen for lower precision, tighten for higher)")
+    fpga.add_argument("--synthesize", action="store_true", help="also attempt real Vivado HLS synthesis (needs vivado_hls on PATH); without this flag, only the HLS project + host C-simulation verification run")
+
     return p
 
 
@@ -188,6 +206,67 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_convert_fpga(args: argparse.Namespace) -> int:
+    try:
+        from edgeforge.fpga.convert import HlsToolNotFoundError, convert_and_validate
+    except ImportError as e:
+        print(
+            f"error: the FPGA backend requires the 'hls4ml' package, which failed to import ({e}). "
+            "Install it with: pip install hls4ml",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"== converting {args.model} for FPGA part '{args.part}' (backend={args.backend}) ==")
+    try:
+        result = convert_and_validate(
+            args.model,
+            args.out,
+            part=args.part,
+            backend=args.backend,
+            precision=args.precision,
+            reuse_factor=args.reuse_factor,
+            sample_range=_parse_range(args.sample_range) or (0.0, 1.0),
+            n_samples=args.samples,
+            seed=args.seed,
+            tolerance=args.tolerance,
+            attempt_synthesis=args.synthesize,
+        )
+    except HlsToolNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    print(f"model: {result.param_count} parameters")
+    print(f"HLS project generated: {result.output_dir}")
+
+    if result.validation is None:
+        print(f"error: {result.error}", file=sys.stderr)
+        return 1
+
+    print(f"\n== HLS C-simulation validation ({args.samples} samples) ==")
+    print(result.validation.describe())
+
+    if args.synthesize:
+        print("\n== Vivado HLS synthesis ==")
+        if result.toolchain_missing:
+            print(
+                f"toolchain '{result.toolchain_missing}' not found on this machine ({result.install_hint}); "
+                "HLS project generated and host-verified, but not synthesized"
+            )
+        elif result.synth_ok:
+            print(f"synthesis OK -- report: {result.synth_report}")
+        else:
+            print(f"synthesis failed: {result.error}", file=sys.stderr)
+
+    print()
+    if result.ok:
+        note = "" if not args.synthesize or result.synth_ok else " (source generated + host-verified; synthesis not completed, see above)"
+        print(f"convert-fpga: SUCCESS{note}")
+        return 0
+    print("convert-fpga: FAILED (C-simulation diverged from the original model)", file=sys.stderr)
+    return 1
+
+
 def _load_rep_data(path: Path | None):
     if path is None:
         return None
@@ -207,6 +286,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_convert(args)
     if args.command == "serve":
         return cmd_serve(args)
+    if args.command == "convert-fpga":
+        return cmd_convert_fpga(args)
     parser.print_help()
     return 1
 
