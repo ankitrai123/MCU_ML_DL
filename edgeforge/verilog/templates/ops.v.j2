@@ -1,0 +1,655 @@
+{# Op macros: one per supported IR op (classical tier only in this increment -- tree, linear
+   with float32 weights, affine). Each macro emits a fully self-contained block: its own tensor
+   storage (declared + `initial`-filled once here, since only one node ever owns a given weight
+   tensor), its own local registers, and a small IDLE/RUN/DONE state machine gated by an
+   `ef_n<idx>_start` wire the top-level module drives and an `ef_n<idx>_done` reg it drives back.
+   Nodes chain by wiring node k's done to node k+1's start (see model.v.j2) -- the same "run to
+   completion, then hand off" shape as the C codegen's straight-line sequence of statements,
+   just spread across clock cycles instead of executing instantly. Every value is Q16.16 fixed
+   point (see fixedpoint.py) except tree index arrays (feature/left/right), which are plain
+   integers. #}
+
+{% macro emit_tree(node, ir, idx) %}
+{% set feat = ir.tensors[node.attrs.feature] %}
+{% set thr = ir.tensors[node.attrs.threshold] %}
+{% set left = ir.tensors[node.attrs.left] %}
+{% set right = ir.tensors[node.attrs.right] %}
+{% set leaf = ir.tensors[node.attrs.leaf_value] %}
+{% set in_name = buf_name(node.inputs[0]) %}
+{% set out_name = buf_name(node.outputs[0]) %}
+{% set n_nodes = feat.shape[0] %}
+    // ---- node {{ idx }}: tree '{{ node.name }}' ({{ n_nodes }} tree nodes) ----
+    reg signed [31:0] {{ buf_name(feat.name) }} [0:{{ n_nodes - 1 }}];
+    reg signed [31:0] {{ buf_name(thr.name) }}  [0:{{ n_nodes - 1 }}];
+    reg signed [31:0] {{ buf_name(left.name) }} [0:{{ n_nodes - 1 }}];
+    reg signed [31:0] {{ buf_name(right.name) }}[0:{{ n_nodes - 1 }}];
+    reg signed [31:0] {{ buf_name(leaf.name) }} [0:{{ n_nodes - 1 }}];
+    initial begin
+{% for line in tensor_init_lines(feat) %}
+{{ line }}
+{% endfor %}
+{% for line in tensor_init_lines(thr) %}
+{{ line }}
+{% endfor %}
+{% for line in tensor_init_lines(left) %}
+{{ line }}
+{% endfor %}
+{% for line in tensor_init_lines(right) %}
+{{ line }}
+{% endfor %}
+{% for line in tensor_init_lines(leaf) %}
+{{ line }}
+{% endfor %}
+    end
+
+    localparam EF_N{{ idx }}_IDLE = 0, EF_N{{ idx }}_WALK = 1, EF_N{{ idx }}_WRITE = 2, EF_N{{ idx }}_DONE = 3;
+    reg [1:0] ef_n{{ idx }}_state;
+    reg signed [31:0] ef_n{{ idx }}_node_idx;
+    reg signed [31:0] ef_n{{ idx }}_k;
+    reg signed [31:0] ef_n{{ idx }}_predicted;
+    reg ef_n{{ idx }}_done;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+            ef_n{{ idx }}_done <= 0;
+        end else begin
+            case (ef_n{{ idx }}_state)
+                EF_N{{ idx }}_IDLE: begin
+                    ef_n{{ idx }}_done <= 0;
+                    if (ef_n{{ idx }}_start) begin
+                        ef_n{{ idx }}_node_idx <= 0;
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_WALK;
+                    end
+                end
+                EF_N{{ idx }}_WALK: begin
+                    if ({{ buf_name(feat.name) }}[ef_n{{ idx }}_node_idx] < 0) begin
+                        ef_n{{ idx }}_predicted <= ({{ buf_name(leaf.name) }}[ef_n{{ idx }}_node_idx] + 32'sd32768) >>> 16;
+                        ef_n{{ idx }}_k <= 0;
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_WRITE;
+                    end else if ({{ in_name }}[{{ buf_name(feat.name) }}[ef_n{{ idx }}_node_idx]] <= {{ buf_name(thr.name) }}[ef_n{{ idx }}_node_idx]) begin
+                        ef_n{{ idx }}_node_idx <= {{ buf_name(left.name) }}[ef_n{{ idx }}_node_idx];
+                    end else begin
+                        ef_n{{ idx }}_node_idx <= {{ buf_name(right.name) }}[ef_n{{ idx }}_node_idx];
+                    end
+                end
+                EF_N{{ idx }}_WRITE: begin
+{% if node.attrs.is_classifier %}
+                    {{ out_name }}[ef_n{{ idx }}_k] <= (ef_n{{ idx }}_k == ef_n{{ idx }}_predicted) ? 32'sd65536 : 32'sd0;
+                    if (ef_n{{ idx }}_k == {{ node.attrs.out_size - 1 }}) begin
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_DONE;
+                    end else begin
+                        ef_n{{ idx }}_k <= ef_n{{ idx }}_k + 1;
+                    end
+{% else %}
+                    {{ out_name }}[0] <= {{ buf_name(leaf.name) }}[ef_n{{ idx }}_node_idx];
+                    ef_n{{ idx }}_state <= EF_N{{ idx }}_DONE;
+{% endif %}
+                end
+                EF_N{{ idx }}_DONE: begin
+                    ef_n{{ idx }}_done <= 1;
+                    ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+                end
+            endcase
+        end
+    end
+{% endmacro %}
+
+{% macro emit_linear(node, ir, idx) %}
+{% set w = ir.tensors[node.attrs.weight] %}
+{% set b = ir.tensors[node.attrs.bias] if node.attrs.bias else none %}
+{% set in_name = buf_name(node.inputs[0]) %}
+{% set out_name = buf_name(node.outputs[0]) %}
+{% set n_out = w.shape[0] %}
+{% set n_in = w.shape[1] %}
+    // ---- node {{ idx }}: linear '{{ node.name }}' ({{ n_out }}x{{ n_in }}) ----
+    reg signed [31:0] {{ buf_name(w.name) }} [0:{{ (n_out * n_in) - 1 }}];
+{% if b %}
+    reg signed [31:0] {{ buf_name(b.name) }} [0:{{ n_out - 1 }}];
+{% endif %}
+    initial begin
+{% for line in tensor_init_lines(w) %}
+{{ line }}
+{% endfor %}
+{% if b %}
+{% for line in tensor_init_lines(b) %}
+{{ line }}
+{% endfor %}
+{% endif %}
+    end
+
+    localparam EF_N{{ idx }}_MAC = 0, EF_N{{ idx }}_WRITE = 1, EF_N{{ idx }}_DONE = 2, EF_N{{ idx }}_IDLE = 3;
+    reg [1:0] ef_n{{ idx }}_state;
+    reg [15:0] ef_n{{ idx }}_i, ef_n{{ idx }}_j;
+    reg signed [63:0] ef_n{{ idx }}_acc;
+    reg ef_n{{ idx }}_done;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+            ef_n{{ idx }}_done <= 0;
+        end else begin
+            case (ef_n{{ idx }}_state)
+                EF_N{{ idx }}_IDLE: begin
+                    ef_n{{ idx }}_done <= 0;
+                    if (ef_n{{ idx }}_start) begin
+                        ef_n{{ idx }}_i <= 0; ef_n{{ idx }}_j <= 0; ef_n{{ idx }}_acc <= 0;
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                    end
+                end
+                EF_N{{ idx }}_MAC: begin
+                    ef_n{{ idx }}_acc <= ef_n{{ idx }}_acc
+                        + ($signed({{ buf_name(w.name) }}[ef_n{{ idx }}_i * {{ n_in }} + ef_n{{ idx }}_j])
+                           * $signed({{ in_name }}[ef_n{{ idx }}_j]));
+                    if (ef_n{{ idx }}_j == {{ n_in - 1 }}) begin
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_WRITE;
+                    end else begin
+                        ef_n{{ idx }}_j <= ef_n{{ idx }}_j + 1;
+                    end
+                end
+                EF_N{{ idx }}_WRITE: begin
+                    {{ out_name }}[ef_n{{ idx }}_i] <= (ef_n{{ idx }}_acc >>> 16){% if b %} + {{ buf_name(b.name) }}[ef_n{{ idx }}_i]{% endif %};
+                    if (ef_n{{ idx }}_i == {{ n_out - 1 }}) begin
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_DONE;
+                    end else begin
+                        ef_n{{ idx }}_i <= ef_n{{ idx }}_i + 1;
+                        ef_n{{ idx }}_j <= 0;
+                        ef_n{{ idx }}_acc <= 0;
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                    end
+                end
+                EF_N{{ idx }}_DONE: begin
+                    ef_n{{ idx }}_done <= 1;
+                    ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+                end
+            endcase
+        end
+    end
+{% endmacro %}
+
+{% macro emit_affine(node, ir, idx) %}
+{% set scale = ir.tensors[node.attrs.scale] %}
+{% set shift = ir.tensors[node.attrs.shift] %}
+{% set in_name = buf_name(node.inputs[0]) %}
+{% set out_name = buf_name(node.outputs[0]) %}
+{% set n = scale.shape[0] %}
+    // ---- node {{ idx }}: affine '{{ node.name }}' ({{ n }} features) ----
+    reg signed [31:0] {{ buf_name(scale.name) }} [0:{{ n - 1 }}];
+    reg signed [31:0] {{ buf_name(shift.name) }} [0:{{ n - 1 }}];
+    initial begin
+{% for line in tensor_init_lines(scale) %}
+{{ line }}
+{% endfor %}
+{% for line in tensor_init_lines(shift) %}
+{{ line }}
+{% endfor %}
+    end
+
+    localparam EF_N{{ idx }}_RUN = 0, EF_N{{ idx }}_DONE = 1, EF_N{{ idx }}_IDLE = 2;
+    reg [1:0] ef_n{{ idx }}_state;
+    reg [15:0] ef_n{{ idx }}_k;
+    reg ef_n{{ idx }}_done;
+    // A bare `(a*b) >>> 16` inline would let Verilog's context-determined width rules size the
+    // multiply itself to the (32-bit) assignment target -- silently truncating the true product
+    // *before* the shift, unlike linear's MAC (safe because its target is already the 64-bit
+    // accumulator). Declaring the product as its own 64-bit wire forces the multiply itself to
+    // be computed at full width first; found by simulating this exact bug, not by inspection.
+    wire signed [63:0] ef_n{{ idx }}_prod = $signed({{ in_name }}[ef_n{{ idx }}_k]) * $signed({{ buf_name(scale.name) }}[ef_n{{ idx }}_k]);
+
+    always @(posedge clk) begin
+        if (rst) begin
+            ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+            ef_n{{ idx }}_done <= 0;
+        end else begin
+            case (ef_n{{ idx }}_state)
+                EF_N{{ idx }}_IDLE: begin
+                    ef_n{{ idx }}_done <= 0;
+                    if (ef_n{{ idx }}_start) begin
+                        ef_n{{ idx }}_k <= 0;
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_RUN;
+                    end
+                end
+                EF_N{{ idx }}_RUN: begin
+                    {{ out_name }}[ef_n{{ idx }}_k] <= (ef_n{{ idx }}_prod >>> 16) + {{ buf_name(shift.name) }}[ef_n{{ idx }}_k];
+                    if (ef_n{{ idx }}_k == {{ n - 1 }}) begin
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_DONE;
+                    end else begin
+                        ef_n{{ idx }}_k <= ef_n{{ idx }}_k + 1;
+                    end
+                end
+                EF_N{{ idx }}_DONE: begin
+                    ef_n{{ idx }}_done <= 1;
+                    ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+                end
+            endcase
+        end
+    end
+{% endmacro %}
+
+{% macro emit_activation(node, ir, idx) %}
+{% set t = ir.tensors[node.inputs[0]] %}
+{% set buf = buf_name(node.inputs[0]) %}
+{% set kind = node.attrs.kind %}
+    // ---- node {{ idx }}: activation '{{ node.name }}' (kind={{ kind }}, {{ t.size }} elements, in place) ----
+    localparam EF_N{{ idx }}_RUN = 0, EF_N{{ idx }}_DONE = 1, EF_N{{ idx }}_IDLE = 2;
+    reg [1:0] ef_n{{ idx }}_state;
+    reg [15:0] ef_n{{ idx }}_k;
+    reg ef_n{{ idx }}_done;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+            ef_n{{ idx }}_done <= 0;
+        end else begin
+            case (ef_n{{ idx }}_state)
+                EF_N{{ idx }}_IDLE: begin
+                    ef_n{{ idx }}_done <= 0;
+                    if (ef_n{{ idx }}_start) begin
+                        ef_n{{ idx }}_k <= 0;
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_RUN;
+                    end
+                end
+                EF_N{{ idx }}_RUN: begin
+{% if kind == 'relu' %}
+                    if ($signed({{ buf }}[ef_n{{ idx }}_k]) < 0) begin
+                        {{ buf }}[ef_n{{ idx }}_k] <= 0;
+                    end
+{% elif kind == 'relu6' %}
+                    if ($signed({{ buf }}[ef_n{{ idx }}_k]) < 0) begin
+                        {{ buf }}[ef_n{{ idx }}_k] <= 0;
+                    end else if ($signed({{ buf }}[ef_n{{ idx }}_k]) > {{ fixed_literal(6.0) }}) begin
+                        {{ buf }}[ef_n{{ idx }}_k] <= {{ fixed_literal(6.0) }};
+                    end
+{% endif %}
+                    if (ef_n{{ idx }}_k == {{ t.size - 1 }}) begin
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_DONE;
+                    end else begin
+                        ef_n{{ idx }}_k <= ef_n{{ idx }}_k + 1;
+                    end
+                end
+                EF_N{{ idx }}_DONE: begin
+                    ef_n{{ idx }}_done <= 1;
+                    ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+                end
+            endcase
+        end
+    end
+{% endmacro %}
+
+{# ============================================================================================
+   Deep tier (int8/TFLite): every value below is a plain int8/int32 quantized integer, never
+   Q16.16 -- requantization (accumulator -> next layer's int8 domain) uses an integer
+   multiply-then-shift per output channel (edgeforge/verilog/quant_math.py), the same technique
+   real quantized-NN hardware (and TFLite Micro on a target with no float unit) uses, since RTL
+   has no float unit to spend on the plain-float-multiplier trick the C codegen uses instead
+   (see edgeforge/codegen/quant_math.py's docstring for why that's fine for every MCU board but
+   not for a small FPGA). `emit_requant_wires` is shared by every deep-tier op below: it turns
+   a node's raw int32 accumulator into a clamped int8 output value via that same multiply-shift,
+   using an explicit-width wire for the multiply itself -- a bare inline `(a*b) >>> n` would let
+   Verilog's context-determined width rules truncate the multiply to the assignment target's
+   width *before* the shift (the exact bug the classical tier's affine op had; see convert.py's
+   module docstring). #}
+
+{% macro emit_requant_wires(idx, m0_values, tshift_values, acc_expr, channel_expr, out_zp, qmin, qmax) %}
+    reg signed [31:0] ef_n{{ idx }}_m0 [0:{{ (m0_values | length) - 1 }}];
+    reg signed [7:0] ef_n{{ idx }}_tshift [0:{{ (tshift_values | length) - 1 }}];
+    initial begin
+{% for m0 in m0_values %}
+        ef_n{{ idx }}_m0[{{ loop.index0 }}] = {{ verilog_signed_literal(m0) }};
+{% endfor %}
+{% for ts in tshift_values %}
+        ef_n{{ idx }}_tshift[{{ loop.index0 }}] = {{ ts }};
+{% endfor %}
+    end
+    wire signed [31:0] ef_n{{ idx }}_cur_m0 = ef_n{{ idx }}_m0[{{ channel_expr }}];
+    wire signed [7:0] ef_n{{ idx }}_cur_tshift = ef_n{{ idx }}_tshift[{{ channel_expr }}];
+    // 32x32 -> 64-bit: an explicit wide wire, not a bare inline `(a*b)`, is what keeps this
+    // multiply from being truncated to a narrower context width before the shift below.
+    wire signed [63:0] ef_n{{ idx }}_product = $signed({{ acc_expr }}) * ef_n{{ idx }}_cur_m0;
+    wire signed [63:0] ef_n{{ idx }}_half = (ef_n{{ idx }}_cur_tshift >= 1) ? (64'sd1 <<< (ef_n{{ idx }}_cur_tshift - 1)) : 64'sd0;
+    wire signed [63:0] ef_n{{ idx }}_scaled =
+        (ef_n{{ idx }}_cur_tshift <= 0)
+            ? (ef_n{{ idx }}_product <<< (-ef_n{{ idx }}_cur_tshift))
+            : ((ef_n{{ idx }}_product + ef_n{{ idx }}_half) >>> ef_n{{ idx }}_cur_tshift);
+    wire signed [31:0] ef_n{{ idx }}_requant = ef_n{{ idx }}_scaled[31:0] + {{ int_literal(out_zp) }};
+    wire signed [31:0] ef_n{{ idx }}_clamped =
+        (ef_n{{ idx }}_requant < {{ int_literal(qmin) }}) ? {{ int_literal(qmin) }} :
+        (ef_n{{ idx }}_requant > {{ int_literal(qmax) }}) ? {{ int_literal(qmax) }} : ef_n{{ idx }}_requant;
+{% endmacro %}
+
+{% macro emit_linear_i8(node, ir, idx) %}
+{% set w = ir.tensors[node.attrs.weight] %}
+{% set b = ir.tensors[node.attrs.bias] if node.attrs.bias else none %}
+{% set in_t = ir.tensors[node.inputs[0]] %}
+{% set out_t = ir.tensors[node.outputs[0]] %}
+{% set in_name = buf_name(node.inputs[0]) %}
+{% set out_name = buf_name(node.outputs[0]) %}
+{% set n_out = w.shape[0] %}
+{% set n_in = w.shape[1] %}
+{% set in_zp = in_t.zero_point[0] %}
+{% set mults = requant_multipliers_for_node(node, ir) %}
+{% set qmin, qmax = fused_activation_bounds(node, ir) %}
+    // ---- node {{ idx }}: linear (int8) '{{ node.name }}' ({{ n_out }}x{{ n_in }}) ----
+    reg signed [7:0] {{ buf_name(w.name) }} [0:{{ (n_out * n_in) - 1 }}];
+{% if b %}
+    reg signed [31:0] {{ buf_name(b.name) }} [0:{{ n_out - 1 }}];
+{% endif %}
+    initial begin
+{% for line in tensor_init_lines(w) %}
+{{ line }}
+{% endfor %}
+{% if b %}
+{% for line in tensor_init_lines(b) %}
+{{ line }}
+{% endfor %}
+{% endif %}
+    end
+
+    localparam EF_N{{ idx }}_MAC = 0, EF_N{{ idx }}_WRITE = 1, EF_N{{ idx }}_DONE = 2, EF_N{{ idx }}_IDLE = 3;
+    reg [1:0] ef_n{{ idx }}_state;
+    reg [15:0] ef_n{{ idx }}_i, ef_n{{ idx }}_j;
+    reg signed [31:0] ef_n{{ idx }}_acc;
+    reg ef_n{{ idx }}_done;
+
+    {{ emit_requant_wires(idx, mults | map(attribute=0) | list, mults | map(attribute=1) | list, 'ef_n' ~ idx ~ '_acc', 'ef_n' ~ idx ~ '_i', out_t.zero_point[0], qmin, qmax) }}
+
+    always @(posedge clk) begin
+        if (rst) begin
+            ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+            ef_n{{ idx }}_done <= 0;
+        end else begin
+            case (ef_n{{ idx }}_state)
+                EF_N{{ idx }}_IDLE: begin
+                    ef_n{{ idx }}_done <= 0;
+                    if (ef_n{{ idx }}_start) begin
+                        ef_n{{ idx }}_i <= 0; ef_n{{ idx }}_j <= 0;
+                        ef_n{{ idx }}_acc <= {% if b %}{{ buf_name(b.name) }}[0]{% else %}0{% endif %};
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                    end
+                end
+                EF_N{{ idx }}_MAC: begin
+                    ef_n{{ idx }}_acc <= ef_n{{ idx }}_acc
+                        + (($signed({{ in_name }}[ef_n{{ idx }}_j]) - {{ int_literal(in_zp) }})
+                           * $signed({{ buf_name(w.name) }}[ef_n{{ idx }}_i * {{ n_in }} + ef_n{{ idx }}_j]));
+                    if (ef_n{{ idx }}_j == {{ n_in - 1 }}) begin
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_WRITE;
+                    end else begin
+                        ef_n{{ idx }}_j <= ef_n{{ idx }}_j + 1;
+                    end
+                end
+                EF_N{{ idx }}_WRITE: begin
+                    {{ out_name }}[ef_n{{ idx }}_i] <= ef_n{{ idx }}_clamped;
+                    if (ef_n{{ idx }}_i == {{ n_out - 1 }}) begin
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_DONE;
+                    end else begin
+                        ef_n{{ idx }}_i <= ef_n{{ idx }}_i + 1;
+                        ef_n{{ idx }}_j <= 0;
+                        ef_n{{ idx }}_acc <= {% if b %}{{ buf_name(b.name) }}[ef_n{{ idx }}_i + 1]{% else %}0{% endif %};
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                    end
+                end
+                EF_N{{ idx }}_DONE: begin
+                    ef_n{{ idx }}_done <= 1;
+                    ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+                end
+            endcase
+        end
+    end
+{% endmacro %}
+
+{% macro emit_conv2d(node, ir, idx, depthwise=False) %}
+{% set w = ir.tensors[node.attrs.weight] %}
+{% set b = ir.tensors[node.attrs.bias] if node.attrs.bias else none %}
+{% set in_t = ir.tensors[node.inputs[0]] %}
+{% set out_t = ir.tensors[node.outputs[0]] %}
+{% set in_name = buf_name(node.inputs[0]) %}
+{% set out_name = buf_name(node.outputs[0]) %}
+{% set a = node.attrs %}
+{% set in_zp = in_t.zero_point[0] %}
+{% set mults = requant_multipliers_for_node(node, ir) %}
+{% set qmin, qmax = fused_activation_bounds(node, ir) %}
+{% set w_size = (1 if depthwise else a.out_c) * a.filter_h * a.filter_w * a.in_c %}
+    // ---- node {{ idx }}: {{ 'depthwise_conv2d' if depthwise else 'conv2d' }} '{{ node.name }}' ----
+    reg signed [7:0] {{ buf_name(w.name) }} [0:{{ w_size - 1 }}];
+{% if b %}
+    reg signed [31:0] {{ buf_name(b.name) }} [0:{{ a.out_c - 1 }}];
+{% endif %}
+    initial begin
+{% for line in tensor_init_lines(w) %}
+{{ line }}
+{% endfor %}
+{% if b %}
+{% for line in tensor_init_lines(b) %}
+{{ line }}
+{% endfor %}
+{% endif %}
+    end
+
+    localparam EF_N{{ idx }}_MAC = 0, EF_N{{ idx }}_WRITE = 1, EF_N{{ idx }}_DONE = 2, EF_N{{ idx }}_IDLE = 3;
+    reg [1:0] ef_n{{ idx }}_state;
+    reg [15:0] ef_n{{ idx }}_oc, ef_n{{ idx }}_oh, ef_n{{ idx }}_ow, ef_n{{ idx }}_kh, ef_n{{ idx }}_kw, ef_n{{ idx }}_ic;
+    reg signed [31:0] ef_n{{ idx }}_acc;
+    reg ef_n{{ idx }}_done;
+
+    wire signed [17:0] ef_n{{ idx }}_ih = $signed({1'b0, ef_n{{ idx }}_oh}) * {{ a.stride_h }} + $signed({1'b0, ef_n{{ idx }}_kh}) - {{ a.pad_top }};
+    wire signed [17:0] ef_n{{ idx }}_iw = $signed({1'b0, ef_n{{ idx }}_ow}) * {{ a.stride_w }} + $signed({1'b0, ef_n{{ idx }}_kw}) - {{ a.pad_left }};
+    wire ef_n{{ idx }}_in_range = (ef_n{{ idx }}_ih >= 0) && (ef_n{{ idx }}_ih < {{ a.in_h }}) && (ef_n{{ idx }}_iw >= 0) && (ef_n{{ idx }}_iw < {{ a.in_w }});
+{% if depthwise %}
+    wire [15:0] ef_n{{ idx }}_in_c_idx = ef_n{{ idx }}_oc / {{ a.depth_multiplier }};
+    wire [31:0] ef_n{{ idx }}_in_idx = ef_n{{ idx }}_ih * {{ a.in_w * a.in_c }} + ef_n{{ idx }}_iw * {{ a.in_c }} + ef_n{{ idx }}_in_c_idx;
+    wire [31:0] ef_n{{ idx }}_w_idx = ef_n{{ idx }}_kh * {{ a.filter_w * a.out_c }} + ef_n{{ idx }}_kw * {{ a.out_c }} + ef_n{{ idx }}_oc;
+{% else %}
+    wire [31:0] ef_n{{ idx }}_in_idx = ef_n{{ idx }}_ih * {{ a.in_w * a.in_c }} + ef_n{{ idx }}_iw * {{ a.in_c }} + ef_n{{ idx }}_ic;
+    wire [31:0] ef_n{{ idx }}_w_idx = ef_n{{ idx }}_oc * {{ a.filter_h * a.filter_w * a.in_c }} + ef_n{{ idx }}_kh * {{ a.filter_w * a.in_c }} + ef_n{{ idx }}_kw * {{ a.in_c }} + ef_n{{ idx }}_ic;
+{% endif %}
+    wire [31:0] ef_n{{ idx }}_out_idx = ef_n{{ idx }}_oh * {{ a.out_w * a.out_c }} + ef_n{{ idx }}_ow * {{ a.out_c }} + ef_n{{ idx }}_oc;
+
+    {{ emit_requant_wires(idx, mults | map(attribute=0) | list, mults | map(attribute=1) | list, 'ef_n' ~ idx ~ '_acc', 'ef_n' ~ idx ~ '_oc', out_t.zero_point[0], qmin, qmax) }}
+
+    always @(posedge clk) begin
+        if (rst) begin
+            ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+            ef_n{{ idx }}_done <= 0;
+        end else begin
+            case (ef_n{{ idx }}_state)
+                EF_N{{ idx }}_IDLE: begin
+                    ef_n{{ idx }}_done <= 0;
+                    if (ef_n{{ idx }}_start) begin
+                        ef_n{{ idx }}_oc <= 0; ef_n{{ idx }}_oh <= 0; ef_n{{ idx }}_ow <= 0;
+                        ef_n{{ idx }}_kh <= 0; ef_n{{ idx }}_kw <= 0; ef_n{{ idx }}_ic <= 0;
+                        ef_n{{ idx }}_acc <= {% if b %}{{ buf_name(b.name) }}[0]{% else %}0{% endif %};
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                    end
+                end
+                EF_N{{ idx }}_MAC: begin
+                    if (ef_n{{ idx }}_in_range) begin
+                        ef_n{{ idx }}_acc <= ef_n{{ idx }}_acc +
+                            (($signed({{ in_name }}[ef_n{{ idx }}_in_idx]) - {{ int_literal(in_zp) }})
+                             * $signed({{ buf_name(w.name) }}[ef_n{{ idx }}_w_idx]));
+                    end
+{% if depthwise %}
+                    // depthwise: each output channel reads exactly one input channel (fixed by
+                    // ef_n{{ idx }}_in_c_idx above) -- no separate ic loop, unlike plain conv2d.
+                    if (ef_n{{ idx }}_kw == {{ a.filter_w - 1 }}) begin
+                        ef_n{{ idx }}_kw <= 0;
+                        if (ef_n{{ idx }}_kh == {{ a.filter_h - 1 }}) begin
+                            ef_n{{ idx }}_kh <= 0;
+                            ef_n{{ idx }}_state <= EF_N{{ idx }}_WRITE;
+                        end else begin
+                            ef_n{{ idx }}_kh <= ef_n{{ idx }}_kh + 1;
+                        end
+                    end else begin
+                        ef_n{{ idx }}_kw <= ef_n{{ idx }}_kw + 1;
+                    end
+{% else %}
+                    if (ef_n{{ idx }}_ic == {{ a.in_c - 1 }}) begin
+                        ef_n{{ idx }}_ic <= 0;
+                        if (ef_n{{ idx }}_kw == {{ a.filter_w - 1 }}) begin
+                            ef_n{{ idx }}_kw <= 0;
+                            if (ef_n{{ idx }}_kh == {{ a.filter_h - 1 }}) begin
+                                ef_n{{ idx }}_kh <= 0;
+                                ef_n{{ idx }}_state <= EF_N{{ idx }}_WRITE;
+                            end else begin
+                                ef_n{{ idx }}_kh <= ef_n{{ idx }}_kh + 1;
+                            end
+                        end else begin
+                            ef_n{{ idx }}_kw <= ef_n{{ idx }}_kw + 1;
+                        end
+                    end else begin
+                        ef_n{{ idx }}_ic <= ef_n{{ idx }}_ic + 1;
+                    end
+{% endif %}
+                end
+                EF_N{{ idx }}_WRITE: begin
+                    {{ out_name }}[ef_n{{ idx }}_out_idx] <= ef_n{{ idx }}_clamped;
+                    if (ef_n{{ idx }}_ow == {{ a.out_w - 1 }}) begin
+                        ef_n{{ idx }}_ow <= 0;
+                        if (ef_n{{ idx }}_oh == {{ a.out_h - 1 }}) begin
+                            ef_n{{ idx }}_oh <= 0;
+                            if (ef_n{{ idx }}_oc == {{ a.out_c - 1 }}) begin
+                                ef_n{{ idx }}_state <= EF_N{{ idx }}_DONE;
+                            end else begin
+                                ef_n{{ idx }}_oc <= ef_n{{ idx }}_oc + 1;
+                                ef_n{{ idx }}_acc <= {% if b %}{{ buf_name(b.name) }}[ef_n{{ idx }}_oc + 1]{% else %}0{% endif %};
+                                ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                            end
+                        end else begin
+                            ef_n{{ idx }}_oh <= ef_n{{ idx }}_oh + 1;
+                            ef_n{{ idx }}_acc <= {% if b %}{{ buf_name(b.name) }}[ef_n{{ idx }}_oc]{% else %}0{% endif %};
+                            ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                        end
+                    end else begin
+                        ef_n{{ idx }}_ow <= ef_n{{ idx }}_ow + 1;
+                        ef_n{{ idx }}_acc <= {% if b %}{{ buf_name(b.name) }}[ef_n{{ idx }}_oc]{% else %}0{% endif %};
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                    end
+                end
+                EF_N{{ idx }}_DONE: begin
+                    ef_n{{ idx }}_done <= 1;
+                    ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+                end
+            endcase
+        end
+    end
+{% endmacro %}
+
+{% macro emit_pool2d(node, ir, idx) %}
+{% set in_t = ir.tensors[node.inputs[0]] %}
+{% set out_t = ir.tensors[node.outputs[0]] %}
+{% set in_name = buf_name(node.inputs[0]) %}
+{% set out_name = buf_name(node.outputs[0]) %}
+{% set a = node.attrs %}
+    // ---- node {{ idx }}: {{ a.reduce }}pool2d '{{ node.name }}' ----
+    localparam EF_N{{ idx }}_MAC = 0, EF_N{{ idx }}_WRITE = 1, EF_N{{ idx }}_DONE = 2, EF_N{{ idx }}_IDLE = 3;
+    reg [1:0] ef_n{{ idx }}_state;
+    reg [15:0] ef_n{{ idx }}_oc, ef_n{{ idx }}_oh, ef_n{{ idx }}_ow, ef_n{{ idx }}_kh, ef_n{{ idx }}_kw;
+    reg signed [31:0] ef_n{{ idx }}_acc;
+    reg [15:0] ef_n{{ idx }}_count;
+    reg ef_n{{ idx }}_done;
+
+    wire signed [17:0] ef_n{{ idx }}_ih = $signed({1'b0, ef_n{{ idx }}_oh}) * {{ a.stride_h }} + $signed({1'b0, ef_n{{ idx }}_kh}) - {{ a.pad_top }};
+    wire signed [17:0] ef_n{{ idx }}_iw = $signed({1'b0, ef_n{{ idx }}_ow}) * {{ a.stride_w }} + $signed({1'b0, ef_n{{ idx }}_kw}) - {{ a.pad_left }};
+    wire ef_n{{ idx }}_in_range = (ef_n{{ idx }}_ih >= 0) && (ef_n{{ idx }}_ih < {{ a.in_h }}) && (ef_n{{ idx }}_iw >= 0) && (ef_n{{ idx }}_iw < {{ a.in_w }});
+    wire [31:0] ef_n{{ idx }}_in_idx = ef_n{{ idx }}_ih * {{ a.in_w * a.in_c }} + ef_n{{ idx }}_iw * {{ a.in_c }} + ef_n{{ idx }}_oc;
+    wire [31:0] ef_n{{ idx }}_out_idx = ef_n{{ idx }}_oh * {{ a.out_w * a.out_c }} + ef_n{{ idx }}_ow * {{ a.out_c }} + ef_n{{ idx }}_oc;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+            ef_n{{ idx }}_done <= 0;
+        end else begin
+            case (ef_n{{ idx }}_state)
+                EF_N{{ idx }}_IDLE: begin
+                    ef_n{{ idx }}_done <= 0;
+                    if (ef_n{{ idx }}_start) begin
+                        ef_n{{ idx }}_oc <= 0; ef_n{{ idx }}_oh <= 0; ef_n{{ idx }}_ow <= 0;
+                        ef_n{{ idx }}_kh <= 0; ef_n{{ idx }}_kw <= 0;
+{% if a.reduce == 'max' %}
+                        ef_n{{ idx }}_acc <= -32'sd128;
+{% else %}
+                        ef_n{{ idx }}_acc <= 0; ef_n{{ idx }}_count <= 0;
+{% endif %}
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                    end
+                end
+                EF_N{{ idx }}_MAC: begin
+                    if (ef_n{{ idx }}_in_range) begin
+{% if a.reduce == 'max' %}
+                        if ($signed({{ in_name }}[ef_n{{ idx }}_in_idx]) > ef_n{{ idx }}_acc) begin
+                            ef_n{{ idx }}_acc <= $signed({{ in_name }}[ef_n{{ idx }}_in_idx]);
+                        end
+{% else %}
+                        ef_n{{ idx }}_acc <= ef_n{{ idx }}_acc + $signed({{ in_name }}[ef_n{{ idx }}_in_idx]);
+                        ef_n{{ idx }}_count <= ef_n{{ idx }}_count + 1;
+{% endif %}
+                    end
+                    if (ef_n{{ idx }}_kw == {{ a.filter_w - 1 }}) begin
+                        ef_n{{ idx }}_kw <= 0;
+                        if (ef_n{{ idx }}_kh == {{ a.filter_h - 1 }}) begin
+                            ef_n{{ idx }}_kh <= 0;
+                            ef_n{{ idx }}_state <= EF_N{{ idx }}_WRITE;
+                        end else begin
+                            ef_n{{ idx }}_kh <= ef_n{{ idx }}_kh + 1;
+                        end
+                    end else begin
+                        ef_n{{ idx }}_kw <= ef_n{{ idx }}_kw + 1;
+                    end
+                end
+                EF_N{{ idx }}_WRITE: begin
+{% if a.reduce == 'max' %}
+                    {{ out_name }}[ef_n{{ idx }}_out_idx] <= ef_n{{ idx }}_acc;
+{% else %}
+                    {{ out_name }}[ef_n{{ idx }}_out_idx] <= ef_n{{ idx }}_acc / $signed({1'b0, ef_n{{ idx }}_count});
+{% endif %}
+                    if (ef_n{{ idx }}_ow == {{ a.out_w - 1 }}) begin
+                        ef_n{{ idx }}_ow <= 0;
+                        if (ef_n{{ idx }}_oh == {{ a.out_h - 1 }}) begin
+                            ef_n{{ idx }}_oh <= 0;
+                            if (ef_n{{ idx }}_oc == {{ a.out_c - 1 }}) begin
+                                ef_n{{ idx }}_state <= EF_N{{ idx }}_DONE;
+                            end else begin
+                                ef_n{{ idx }}_oc <= ef_n{{ idx }}_oc + 1;
+                                ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                            end
+                        end else begin
+                            ef_n{{ idx }}_oh <= ef_n{{ idx }}_oh + 1;
+                            ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                        end
+                    end else begin
+                        ef_n{{ idx }}_ow <= ef_n{{ idx }}_ow + 1;
+                        ef_n{{ idx }}_state <= EF_N{{ idx }}_MAC;
+                    end
+{% if a.reduce == 'max' %}
+                    ef_n{{ idx }}_acc <= -32'sd128;
+{% else %}
+                    ef_n{{ idx }}_acc <= 0; ef_n{{ idx }}_count <= 0;
+{% endif %}
+                end
+                EF_N{{ idx }}_DONE: begin
+                    ef_n{{ idx }}_done <= 1;
+                    ef_n{{ idx }}_state <= EF_N{{ idx }}_IDLE;
+                end
+            endcase
+        end
+    end
+{% endmacro %}
+
+{% macro emit_node(node, ir, idx) %}
+{% if node.op == 'tree' %}
+{{ emit_tree(node, ir, idx) }}
+{% elif node.op == 'linear' and ir.tensors[node.attrs.weight].dtype == 'float32' %}
+{{ emit_linear(node, ir, idx) }}
+{% elif node.op == 'linear' %}
+{{ emit_linear_i8(node, ir, idx) }}
+{% elif node.op == 'affine' %}
+{{ emit_affine(node, ir, idx) }}
+{% elif node.op == 'activation' %}
+{{ emit_activation(node, ir, idx) }}
+{% elif node.op == 'conv2d' %}
+{{ emit_conv2d(node, ir, idx, depthwise=False) }}
+{% elif node.op == 'depthwise_conv2d' %}
+{{ emit_conv2d(node, ir, idx, depthwise=True) }}
+{% elif node.op == 'maxpool2d' %}
+{{ emit_pool2d(node, ir, idx) }}
+{% endif %}
+{% endmacro %}
