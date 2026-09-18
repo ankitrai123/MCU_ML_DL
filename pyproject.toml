@@ -38,7 +38,7 @@ edgeforge = "edgeforge.cli:main"
 include = ["edgeforge*"]
 
 [tool.setuptools.package-data]
-edgeforge = ["codegen/templates/**/*.j2", "boards/*.yaml", "webui/templates/*.html", "webui/static/*.css"]
+edgeforge = ["codegen/templates/**/*.j2", "boards/*.yaml", "webui/templates/*.html", "webui/static/*.css", "webui/static/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
