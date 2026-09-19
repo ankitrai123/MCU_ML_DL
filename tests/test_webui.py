@@ -1,4 +1,6 @@
+import re
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 
@@ -6,12 +8,19 @@ flask = pytest.importorskip("flask")
 
 from edgeforge.webui import create_app
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 @pytest.fixture
 def client(boards_dir, tmp_path):
     app = create_app(boards_dir=boards_dir, runs_dir=tmp_path / "runs")
     app.config["TESTING"] = True
     return app.test_client()
+
+
+@pytest.fixture(scope="session")
+def room_comfort_csv() -> Path:
+    return REPO_ROOT / "examples" / "room_comfort.csv"
 
 
 def test_index_lists_boards(client):
@@ -107,3 +116,94 @@ def test_no_file_flashes_error(client):
     )
     assert r.status_code == 200
     assert b"choose a model file" in r.data
+
+
+def _upload_csv(client, csv_path):
+    with open(csv_path, "rb") as f:
+        data = f.read()
+    r = client.post(
+        "/train",
+        data={"csv_file": (BytesIO(data), csv_path.name)},
+        content_type="multipart/form-data",
+    )
+    assert r.status_code == 200, r.data.decode()
+    run_id = re.search(r'action="/train/([a-f0-9]+)/run"', r.data.decode()).group(1)
+    return run_id
+
+
+def test_train_form_loads(client):
+    r = client.get("/train")
+    assert r.status_code == 200
+    assert b"Train a model" in r.data
+
+
+def test_train_upload_shows_columns(client, room_comfort_csv):
+    run_id = _upload_csv(client, room_comfort_csv)
+    assert run_id
+
+
+def test_train_upload_rejects_non_csv(client):
+    r = client.post(
+        "/train",
+        data={"csv_file": (BytesIO(b"not a csv"), "data.txt")},
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert r.status_code == 200
+    assert b"doesn" in r.data  # "doesn't look like a CSV file"
+
+
+def test_train_upload_no_file_flashes_error(client):
+    r = client.post("/train", data={}, content_type="multipart/form-data", follow_redirects=True)
+    assert r.status_code == 200
+    assert b"choose a CSV file" in r.data
+
+
+def test_train_run_logistic_regression_succeeds(client, room_comfort_csv):
+    run_id = _upload_csv(client, room_comfort_csv)
+    r = client.post(
+        f"/train/{run_id}/run",
+        data={"label_column": "comfort", "model_type": "logistic_regression", "test_size": "0.2", "seed": "0"},
+    )
+    assert r.status_code == 200
+    text = r.data.decode()
+    assert "accuracy" in text.lower()
+    assert "Download model.pkl" in text
+
+
+def test_train_run_bad_label_column_reshows_configure_page(client, room_comfort_csv):
+    run_id = _upload_csv(client, room_comfort_csv)
+    r = client.post(f"/train/{run_id}/run", data={"label_column": "not_a_column", "model_type": "logistic_regression"})
+    assert r.status_code == 200
+    assert b"not found in the CSV" in r.data
+    assert b"temperature_c" in r.data  # configure page re-rendered with the same columns
+
+
+def test_train_run_unknown_run_id_404s(client):
+    r = client.post("/train/not-a-real-run/run", data={"label_column": "x", "model_type": "logistic_regression"})
+    assert r.status_code == 404
+
+
+def test_train_then_download_model(client, room_comfort_csv):
+    run_id = _upload_csv(client, room_comfort_csv)
+    client.post(f"/train/{run_id}/run", data={"label_column": "comfort", "model_type": "decision_tree_classifier"})
+    r = client.get(f"/runs/{run_id}/download/model.pkl")
+    assert r.status_code == 200
+    assert len(r.data) > 0
+
+
+def test_train_then_convert_chains_into_conversion(client, room_comfort_csv):
+    run_id = _upload_csv(client, room_comfort_csv)
+    client.post(f"/train/{run_id}/run", data={"label_column": "comfort", "model_type": "logistic_regression"})
+    r = client.post(f"/train/{run_id}/convert", data={"board_id": "stm32f411"})
+    assert r.status_code == 200
+    text = r.data.decode()
+    assert "success" in text.lower()
+    assert "matched" in text.lower()
+
+
+def test_convert_before_training_404s(client):
+    # No prior /train/<run_id>/run call, so no model.pkl exists in a fresh run dir.
+    run_id = "0" * 32
+    r = client.post(f"/train/{run_id}/convert", data={"board_id": "stm32f411"})
+    assert r.status_code == 404

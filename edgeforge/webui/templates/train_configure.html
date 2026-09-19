@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}EdgeForge — Train{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('train_form') }}">&larr; upload a different CSV</a>
+
+<form class="card" action="{{ url_for('train_run', run_id=run_id) }}" method="post">
+  <h2>Choose what to predict</h2>
+
+  <label for="label_column">Label column (what to predict)</label>
+  <select id="label_column" name="label_column" required>
+    {% for c in columns %}
+      <option value="{{ c }}" {{ "selected" if c == label_column }}>{{ c }}</option>
+    {% endfor %}
+  </select>
+  <p class="board-hint">Every other column ({{ columns | length - 1 }} of them) is used as a feature.</p>
+
+  <label for="model_type">Model type</label>
+  <select id="model_type" name="model_type" required>
+    {% for task in ("classification", "regression") %}
+    <optgroup label="{{ task }}">
+      {% for k, t, label in model_types if t == task %}
+        <option value="{{ k }}" {{ "selected" if k == model_type }}>{{ label }}</option>
+      {% endfor %}
+    </optgroup>
+    {% endfor %}
+  </select>
+  <p class="board-hint">
+    Classification predicts one of a fixed set of labels (e.g. "comfortable"/"cold"); regression
+    predicts a number. Every model here is wrapped in <code>Pipeline(StandardScaler,
+    estimator)</code>, so the generated C rescales a raw sensor reading on-device automatically.
+  </p>
+
+  <details>
+    <summary>Advanced options</summary>
+    <div class="row">
+      <div>
+        <label for="test_size">Held-out test fraction</label>
+        <input type="number" id="test_size" name="test_size" value="0.2" min="0.05" max="0.5" step="0.05">
+      </div>
+      <div>
+        <label for="seed">Random seed</label>
+        <input type="number" id="seed" name="seed" value="0" min="0">
+      </div>
+    </div>
+    <p class="board-hint">
+      The test fraction is held out and never trained on -- its score is how well the model
+      generalizes, not how well it memorized the training rows.
+    </p>
+  </details>
+
+  <button type="submit">Train</button>
+</form>
+{% endblock %}

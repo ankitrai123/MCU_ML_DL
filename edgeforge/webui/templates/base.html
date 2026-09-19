@@ -11,6 +11,10 @@
     <img class="brand-logo" src="{{ url_for('static', filename='logo.png') }}" alt="Defend Dynamix">
     <h1>EdgeForge</h1>
     <p>Trained model + target board &rarr; compiling embedded C (and firmware, best-effort).</p>
+    <nav class="topnav">
+      <a href="{{ url_for('index') }}">Convert a model</a>
+      <a href="{{ url_for('train_form') }}">Train a model</a>
+    </nav>
   </header>
   <main>
     {% with messages = get_flashed_messages() %}
