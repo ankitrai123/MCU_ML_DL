@@ -37,13 +37,31 @@ feature columns: {{ report.feature_columns | join(", ") }}</pre>
 
 <form class="card" action="{{ url_for('train_convert', run_id=run_id) }}" method="post">
   <h2>Convert this model for a board</h2>
+  <p class="board-hint">Boards this model fits (estimated flash/RAM) are listed first.</p>
 
   <label for="board_id">Target board</label>
   <select id="board_id" name="board_id" required>
-    {% for b in boards %}
-      <option value="{{ b.id }}">{{ b.id }} &mdash; {{ b.name }}</option>
+    {% for board, fits, reason in board_fit %}
+      <option value="{{ board.id }}">{{ board.id }} &mdash; {{ board.name }}{{ "" if fits else " (doesn't fit -- see details below)" }}</option>
     {% endfor %}
   </select>
+
+  <details>
+    <summary>Per-board fit details</summary>
+    <table style="width:100%; margin-top:0.5rem; font-size:0.82rem; border-collapse:collapse;">
+      <tbody>
+        {% for board, fits, reason in board_fit %}
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.4rem 0.5rem 0.4rem 0; font-family:monospace; white-space:nowrap;">{{ board.id }}</td>
+          <td style="padding:0.4rem 0.5rem; white-space:nowrap;">
+            <span class="badge {{ 'ok' if fits else 'bad' }}">{{ 'fits' if fits else 'too large' }}</span>
+          </td>
+          <td style="padding:0.4rem 0.5rem; color:var(--muted);">{{ reason }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
 
   <button type="submit">Convert</button>
 </form>

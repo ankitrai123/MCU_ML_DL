@@ -262,6 +262,18 @@ anything. Model types are deliberately the five estimators
 [Training a model](TRAINING_A_MODEL.md)'s prose mentions in passing, so
 nothing trained here can fail to ingest afterward.
 
+That chained convert form is also a **target picker**: since the model
+already exists server-side at that point (unlike the plain upload form
+above, where a board is chosen in the same submit that provides the model),
+every registered board is footprint-checked against it upfront via
+`edgeforge.quantize.footprint.check_budget()`, and listed fits-first with a
+fits/too-large badge and the estimated flash/RAM behind it (or the
+tier-mismatch/footprint-exceeded reason when it doesn't) — see
+`_board_fit()` in `webui/app.py`. It's informational, not a hard gate: the
+dropdown still lists every board, and picking one that doesn't fit still
+goes through `run_conversion()` and reports the same footprint error the
+plain convert form would, so no gating logic is duplicated.
+
 ## Architecture
 
 ```
@@ -750,9 +762,11 @@ checking something. Tests that invoke the cross toolchains
 validation itself never needs them (host-only, per the design above).
 `test_webui.py` covers the upload/convert/download flow and path-traversal
 rejection on the download route, plus the `/train` upload/configure/run
-flow and its chained conversion, and skips cleanly if Flask isn't installed.
-`test_train.py` covers `train_from_csv()` itself for all five supported
-model types, each round-tripped through `sklearn_ingest.ingest()`.
+flow, its chained conversion, and the target picker's `_board_fit()`
+(fitting and footprint-exceeded boards, sort order), and skips cleanly if
+Flask isn't installed. `test_train.py` covers `train_from_csv()` itself for
+all five supported model types, each round-tripped through
+`sklearn_ingest.ingest()`.
 
 ## Roadmap (context only — not built in this phase)
 
@@ -787,8 +801,12 @@ model types, each round-tripped through `sklearn_ingest.ingest()`.
   over the same library, not the Phase 4 service. Training in the browser
   (upload a CSV, pick a label column and model type, train, download or
   chain into convert — see [Web UI](#web-ui) and `edgeforge/train.py`) is
-  now built there too, still on the Flask dev server with no accounts. Not
-  yet done: accounts/multi-tenant isolation, an upload *service* (vs. a
-  local run directory), a target picker beyond the existing board dropdown,
+  now built there too, still on the Flask dev server with no accounts. The
+  post-training convert form is also a basic target picker (fits/too-large
+  per board, ranked fits-first — see [Web UI](#web-ui)); it only covers the
+  train-then-convert path, since checking fit for an arbitrary uploaded
+  model on the plain convert form would need ingesting it before a board is
+  even chosen, a bigger flow change not done here. Not yet done: accounts/
+  multi-tenant isolation, an upload *service* (vs. a local run directory),
   and any real hosting/deployment mechanics (gunicorn, Docker, TLS) — all
   deliberately deferred to a later step.

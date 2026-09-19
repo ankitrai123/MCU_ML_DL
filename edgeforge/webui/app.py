@@ -18,7 +18,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 from flask import Flask, abort, flash, redirect, render_template, request, send_file, url_for
@@ -26,7 +26,9 @@ from werkzeug.utils import secure_filename
 
 from edgeforge.boards.registry import BoardRegistry
 from edgeforge.errors import EdgeForgeError
+from edgeforge.ingest import detect_and_ingest
 from edgeforge.pipeline import run_conversion
+from edgeforge.quantize.footprint import check_budget
 from edgeforge.train import MODEL_LABELS, MODEL_TYPES, TrainingDataError, train_from_csv
 
 ALLOWED_EXTENSIONS = (".pkl", ".pickle", ".h5", ".keras", ".onnx")
@@ -72,6 +74,25 @@ def _read_csv_columns(csv_path: Path) -> list[str]:
 def _model_type_choices() -> list[tuple[str, str, str]]:
     """(id, task, human label) for every model type, in MODEL_TYPES' own order."""
     return [(k, MODEL_TYPES[k][0], MODEL_LABELS[k]) for k in MODEL_TYPES]
+
+
+def _board_fit(model_path: Path, boards: list) -> list[tuple[Any, bool, str]]:
+    """(board, fits, reason) for every board against the model at model_path -- a target
+    picker: check_budget() raises with an actionable reason on tier mismatch or exceeded
+    flash/RAM instead of returning a false-y report, so a per-board try/except is how this
+    finds out *why* a board doesn't fit, not just that it doesn't. Fitting boards sort first,
+    so the common case (pick any highlighted board) doesn't require reading every reason."""
+    ingest_result = detect_and_ingest(model_path)
+    fit = []
+    for board in boards:
+        try:
+            report = check_budget(ingest_result.ir, board)
+            reason = f"{report.estimated_flash_bytes}B flash / {report.estimated_ram_bytes}B RAM used (of {report.available_flash_bytes}B / {report.available_ram_bytes}B available)"
+            fit.append((board, True, reason))
+        except EdgeForgeError as e:
+            fit.append((board, False, str(e)))
+    fit.sort(key=lambda item: not item[1])
+    return fit
 
 
 def create_app(boards_dir: Optional[Path] = None, runs_dir: Optional[Path] = None) -> Flask:
@@ -216,7 +237,8 @@ def create_app(boards_dir: Optional[Path] = None, runs_dir: Optional[Path] = Non
                 label_column=label_column, model_type=model_type,
             )
 
-        return render_template("train_result.html", run_id=run_id, report=report, boards=_boards())
+        board_fit = _board_fit(model_path, _boards())
+        return render_template("train_result.html", run_id=run_id, report=report, board_fit=board_fit)
 
     @app.route("/train/<run_id>/convert", methods=["POST"])
     def train_convert(run_id):

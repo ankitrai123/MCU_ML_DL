@@ -1,3 +1,4 @@
+import dataclasses
 import re
 from io import BytesIO
 from pathlib import Path
@@ -7,6 +8,7 @@ import pytest
 flask = pytest.importorskip("flask")
 
 from edgeforge.webui import create_app
+from edgeforge.webui.app import _board_fit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -207,3 +209,53 @@ def test_convert_before_training_404s(client):
     run_id = "0" * 32
     r = client.post(f"/train/{run_id}/convert", data={"board_id": "stm32f411"})
     assert r.status_code == 404
+
+
+def test_train_result_shows_target_picker_fit_info(client, room_comfort_csv):
+    """The post-training board dropdown is a target picker: every registered board is
+    listed with a fits/too-large badge and a reason, computed from the model that was
+    just trained (not a generic per-board spec table like the plain /convert form's)."""
+    run_id = _upload_csv(client, room_comfort_csv)
+    r = client.post(f"/train/{run_id}/run", data={"label_column": "comfort", "model_type": "logistic_regression"})
+    text = r.data.decode()
+    assert "Per-board fit details" in text
+    assert "stm32f411" in text and "8051_at89s52" in text
+    assert "badge ok" in text  # this tiny model fits every registered board
+    assert "flash" in text.lower() and "ram" in text.lower()
+
+
+def test_board_fit_reports_fitting_boards(tree_clf_path, boards_dir):
+    from edgeforge.boards.registry import BoardRegistry
+
+    boards = [BoardRegistry(boards_dir).get(b) for b in ("stm32f411", "8051_at89s52", "native_cortex_m4")]
+    fit = _board_fit(tree_clf_path, boards)
+    assert len(fit) == 3
+    assert all(fits for _board, fits, _reason in fit)
+    assert all("flash" in reason.lower() for _board, _fits, reason in fit)
+
+
+def test_board_fit_flags_footprint_exceeded_board(tree_clf_path, boards_dir):
+    from edgeforge.boards.registry import BoardRegistry
+
+    board = BoardRegistry(boards_dir).get("stm32f411")
+    # Same "shrink flash to almost nothing" trick test_footprint.py uses to force
+    # FootprintExceededError -- even this small tree can't fit in 10 bytes of flash.
+    tiny_board = dataclasses.replace(board, memory=dataclasses.replace(board.memory, flash_bytes=10, flash_reserved_bytes=0))
+
+    fit = _board_fit(tree_clf_path, [tiny_board])
+    assert fit == [(tiny_board, False, fit[0][2])]
+    assert "flash" in fit[0][2].lower()
+
+
+def test_board_fit_sorts_fitting_boards_first(tree_clf_path, boards_dir):
+    from edgeforge.boards.registry import BoardRegistry
+
+    reg = BoardRegistry(boards_dir)
+    fits_board = reg.get("native_cortex_m4")  # a different id from the shrunk board below
+    board = reg.get("stm32f411")
+    tiny_board = dataclasses.replace(board, memory=dataclasses.replace(board.memory, flash_bytes=10, flash_reserved_bytes=0))
+
+    fit = _board_fit(tree_clf_path, [tiny_board, fits_board])  # doesn't-fit board listed first on input
+    assert [b.id for b, _f, _r in fit] == [fits_board.id, tiny_board.id]  # fitting board sorts first on output
+    assert fit[0][1] is True
+    assert fit[1][1] is False
