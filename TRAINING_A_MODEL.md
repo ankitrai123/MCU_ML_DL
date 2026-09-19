@@ -11,6 +11,14 @@ the simplest tools that work well on a tiny microcontroller. If you already
 know scikit-learn, skip ahead to [the worked example](#the-worked-example-a-complete-script)
 or straight to the [main README](./README.md).
 
+**Prefer a form over a script?** `python -m edgeforge serve`'s **Train a
+model** page (`/train`) walks through this exact same workflow in a
+browser: upload a CSV, pick which column to predict and a model type, and
+it trains, scores, and warns you about the same beginner mistakes covered
+below — no code required. See [Web UI](./README.md#web-ui). The rest of
+this guide explains what that page (and the worked example script) is
+doing under the hood, which is worth reading once even if you use the form.
+
 ## What "training a model" actually means
 
 You show a computer a pile of examples where you already know the right
@@ -195,9 +203,13 @@ small microcontrollers:
 | `MLPClassifier(hidden_layer_sizes=(8,))` | Patterns too complex for the two above | A small neural network — still supported, but start simpler first |
 
 For predicting a *number* instead of a category (e.g. an exact temperature
-rather than "hot/cold"), swap in `DecisionTreeRegressor()`,
-`MLPRegressor(...)`, or plain `LinearRegression()`-style models instead —
-this is called *regression* rather than *classification*.
+rather than "hot/cold"), swap in `DecisionTreeRegressor()` or
+`MLPRegressor(...)` instead — this is called *regression* rather than
+*classification*. (Plain `LinearRegression()` is a common regression
+choice in scikit-learn generally, but EdgeForge's ingest doesn't support it
+specifically — stick to the two listed here, or `LogisticRegression`/
+`DecisionTreeClassifier`/`MLPClassifier` for classification, so your
+`.pkl` is guaranteed to convert.)
 
 **If you're not sure which to pick, start with `LogisticRegression()` or
 `DecisionTreeClassifier()`.** They train in a fraction of a second, and
@@ -271,9 +283,13 @@ This writes the trained `Pipeline` — scaler and model together — to a
 You now have a `.pkl` file. From here it's exactly the main README's
 process:
 
-- **Easiest:** `python -m edgeforge serve`, then open
-  `http://127.0.0.1:5000`, upload your `.pkl`, and pick a board — see
-  [Getting started](./README.md#getting-started--the-easy-way-no-coding-experience-needed).
+- **Trained it in the browser?** The **Train a model** page's results
+  screen has a "Convert this model for a board" form right below your
+  score — pick a board there and skip straight to a converted result, no
+  `.pkl` download/re-upload needed.
+- **Easiest (starting from a `.pkl` file):** `python -m edgeforge serve`,
+  then open `http://127.0.0.1:5000`, upload your `.pkl`, and pick a board —
+  see [Getting started](./README.md#getting-started--the-easy-way-no-coding-experience-needed).
 - **Command line:**
   ```bash
   python -m edgeforge convert --model examples/trained_models/room_comfort_model.pkl \

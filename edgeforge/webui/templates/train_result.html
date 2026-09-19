@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}EdgeForge — Trained{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('train_form') }}">&larr; train another model</a>
+
+<div class="card">
+  <h2>Trained <code>{{ report.model_type }}</code> <span class="badge ok">done</span></h2>
+  <div class="stage">
+    <h3>Data</h3>
+    <pre>{{ report.n_rows }} rows &mdash; {{ report.n_train }} used for training, {{ report.n_test }} held out for testing
+label column: {{ report.label_column }}
+feature columns: {{ report.feature_columns | join(", ") }}</pre>
+  </div>
+
+  <div class="stage">
+    <h3>Score on held-out data
+      <span class="badge {{ 'ok' if report.score >= 0.7 else 'warn' }}">
+        {% if report.task == "classification" %}{{ "%.1f" | format(report.score * 100) }}% accuracy{% else %}R&sup2; = {{ "%.3f" | format(report.score) }}{% endif %}
+      </span>
+    </h3>
+    {% if report.label_counts %}
+    <pre>{% for label, count in report.label_counts.items() %}{{ label }}: {{ count }}
+{% endfor %}</pre>
+    {% endif %}
+  </div>
+
+  {% if report.warnings %}
+  <div class="stage">
+    <h3>Warnings</h3>
+    <pre>{% for w in report.warnings %}&bull; {{ w }}
+{% endfor %}</pre>
+  </div>
+  {% endif %}
+
+  <a href="{{ url_for('download_file', run_id=run_id, filename='model.pkl') }}"><button type="button">Download model.pkl</button></a>
+</div>
+
+<form class="card" action="{{ url_for('train_convert', run_id=run_id) }}" method="post">
+  <h2>Convert this model for a board</h2>
+  <p class="board-hint">Boards this model fits (estimated flash/RAM) are listed first.</p>
+
+  <label for="board_id">Target board</label>
+  <select id="board_id" name="board_id" required>
+    {% for board, fits, reason in board_fit %}
+      <option value="{{ board.id }}">{{ board.id }} &mdash; {{ board.name }}{{ "" if fits else " (doesn't fit -- see details below)" }}</option>
+    {% endfor %}
+  </select>
+
+  <details>
+    <summary>Per-board fit details</summary>
+    <table style="width:100%; margin-top:0.5rem; font-size:0.82rem; border-collapse:collapse;">
+      <tbody>
+        {% for board, fits, reason in board_fit %}
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.4rem 0.5rem 0.4rem 0; font-family:monospace; white-space:nowrap;">{{ board.id }}</td>
+          <td style="padding:0.4rem 0.5rem; white-space:nowrap;">
+            <span class="badge {{ 'ok' if fits else 'bad' }}">{{ 'fits' if fits else 'too large' }}</span>
+          </td>
+          <td style="padding:0.4rem 0.5rem; color:var(--muted);">{{ reason }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+
+  <button type="submit">Convert</button>
+</form>
+{% endblock %}

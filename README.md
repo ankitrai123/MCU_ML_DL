@@ -247,6 +247,33 @@ CLI: no accounts, no auth, and the same "only convert models you trust"
 caveat (ingesting a `.pkl` means unpickling it). Don't bind `--host` to a
 public interface without addressing that.
 
+The same UI also has a **Train a model** page (`/train`), the first slice of
+the hosted-web-front-end roadmap item below: upload a CSV, pick which
+column to predict and a model type (the same automated version of
+[Training a model](TRAINING_A_MODEL.md)'s worked example that
+`edgeforge.train.train_from_csv()` implements), and it trains, scores on a
+held-out split, and surfaces beginner-friendly warnings (too few rows, a
+label with almost no examples) before you ever get to inspect a confusing
+result. The trained `.pkl` downloads directly, or a second form on the same
+results page chains straight into the existing convert flow (pick a board,
+reuse the same footprint/build/golden-vector report) without re-uploading
+anything. Model types are deliberately the five estimators
+`sklearn_ingest.py` actually supports (see below) — not every model type
+[Training a model](TRAINING_A_MODEL.md)'s prose mentions in passing, so
+nothing trained here can fail to ingest afterward.
+
+That chained convert form is also a **target picker**: since the model
+already exists server-side at that point (unlike the plain upload form
+above, where a board is chosen in the same submit that provides the model),
+every registered board is footprint-checked against it upfront via
+`edgeforge.quantize.footprint.check_budget()`, and listed fits-first with a
+fits/too-large badge and the estimated flash/RAM behind it (or the
+tier-mismatch/footprint-exceeded reason when it doesn't) — see
+`_board_fit()` in `webui/app.py`. It's informational, not a hard gate: the
+dropdown still lists every board, and picking one that doesn't fit still
+goes through `run_conversion()` and reports the same footprint error the
+plain convert form would, so no gating logic is duplicated.
+
 ## Architecture
 
 ```
@@ -333,7 +360,12 @@ model file --[ingest]--> ModelIR --[footprint]--> gate --[codegen]--> C source -
 
 - **`edgeforge/webui/`** — the basic local web UI described above: a Flask
   app calling straight into `pipeline.run_conversion()`, plus the templates
-  and a little CSS. No business logic lives here.
+  and a little CSS. No business logic lives here. Its `/train` routes are
+  the same pattern applied to `edgeforge/train.py`'s `train_from_csv()`: the
+  Flask layer only handles the upload/form/redirect plumbing, and a trained
+  run's `model.pkl` sits in that run's own directory so the existing
+  `/runs/<id>/download/...` route and a `/train/<id>/convert` route (which
+  just calls `run_conversion()` again) both work on it unchanged.
 
 - **`edgeforge/validate/golden.py`** — the main defense against silent
   precision bugs. N sample inputs run through the *original* model
@@ -729,7 +761,12 @@ checking something. Tests that invoke the cross toolchains
 (`arm-none-eabi-gcc`, `sdcc`) skip cleanly if those aren't installed; golden
 validation itself never needs them (host-only, per the design above).
 `test_webui.py` covers the upload/convert/download flow and path-traversal
-rejection on the download route, and skips cleanly if Flask isn't installed.
+rejection on the download route, plus the `/train` upload/configure/run
+flow, its chained conversion, and the target picker's `_board_fit()`
+(fitting and footprint-exceeded boards, sort order), and skips cleanly if
+Flask isn't installed. `test_train.py` covers `train_from_csv()` itself for
+all five supported model types, each round-tripped through
+`sklearn_ingest.ingest()`.
 
 ## Roadmap (context only — not built in this phase)
 
@@ -761,4 +798,15 @@ rejection on the download route, and skips cleanly if Flask isn't installed.
 - **Phase 4**: a full hosted web front end (accounts, an upload *service*,
   training, a target picker) on top of this library. The `serve` command
   above is a basic single-user local UI added ahead of that — a thin layer
-  over the same library, not the Phase 4 service.
+  over the same library, not the Phase 4 service. Training in the browser
+  (upload a CSV, pick a label column and model type, train, download or
+  chain into convert — see [Web UI](#web-ui) and `edgeforge/train.py`) is
+  now built there too, still on the Flask dev server with no accounts. The
+  post-training convert form is also a basic target picker (fits/too-large
+  per board, ranked fits-first — see [Web UI](#web-ui)); it only covers the
+  train-then-convert path, since checking fit for an arbitrary uploaded
+  model on the plain convert form would need ingesting it before a board is
+  even chosen, a bigger flow change not done here. Not yet done: accounts/
+  multi-tenant isolation, an upload *service* (vs. a local run directory),
+  and any real hosting/deployment mechanics (gunicorn, Docker, TLS) — all
+  deliberately deferred to a later step.

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}EdgeForge — Train{% endblock %}
+{% block content %}
+<form class="card" action="{{ url_for('train_upload') }}" method="post" enctype="multipart/form-data">
+  <h2>Train a model from a CSV</h2>
+  <p class="board-hint">
+    Upload a CSV where every row is one example: some feature columns plus one column holding
+    the answer you want to predict. This is the same workflow as
+    <code>TRAINING_A_MODEL.md</code>'s worked example, automated -- pick the label column and a
+    model type on the next screen, and EdgeForge trains, scores, and hands you a model you can
+    convert right away.
+  </p>
+
+  <label for="csv_file">Training data (CSV)</label>
+  <input type="file" id="csv_file" name="csv_file" accept=".csv" required>
+  <p class="board-hint">Every column must be filled in for every row -- no blank cells.</p>
+
+  <button type="submit">Continue</button>
+</form>
+{% endblock %}
