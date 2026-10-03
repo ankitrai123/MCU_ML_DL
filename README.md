@@ -17,6 +17,10 @@ backend](#veriloglattice-backend-convert-verilog-experimental)), a
 from-scratch RTL generator for the open-source Lattice (Yosys/NextPNR) flow.
 A full hosted web front end is a later phase — see [Roadmap](#roadmap).
 
+> **Non-technical overview:** a two-page, diagram-first summary for managers is in
+> [docs/EdgeForge_Overview.pdf](docs/EdgeForge_Overview.pdf) (HTML version:
+> [docs/EdgeForge_Overview.html](docs/EdgeForge_Overview.html)).
+
 ## Getting started — the easy way (no coding experience needed)
 
 This uses the point-and-click web page, not the command-line tool. You'll
