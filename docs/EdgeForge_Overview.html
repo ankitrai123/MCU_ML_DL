@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EdgeForge Overview</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+/* Layout: two printable "sheets", each a stack of one diagram per idea; text only as labels and one-line captions */
+:root {
+  --bg: #f6f7f8;
+  --sheet: #ffffff;
+  --ink: #17212b;
+  --muted: #5a6773;
+  --line: #c9d1d8;
+  --accent: #0f6e78;      /* the product: teal */
+  --accent-soft: #e2f1f2;
+  --gate: #b86a12;        /* quality gates: amber */
+  --gate-soft: #fbefdf;
+  --ok: #2f7d3a;
+  --ok-soft: #e4f2e6;
+  --plan: #6b7682;
+  --plan-soft: #eef1f3;
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "Source Sans 3", "Segoe UI", Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f1418; --sheet: #161d23; --ink: #e6ebef; --muted: #9aa7b2; --line: #33404b;
+  --accent: #4fb8c2; --accent-soft: #15343a; --gate: #e5a04f; --gate-soft: #3a2a17;
+  --ok: #6cc47a; --ok-soft: #1a3220; --plan: #9aa7b2; --plan-soft: #222b33; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0f1418; --sheet: #161d23; --ink: #e6ebef; --muted: #9aa7b2; --line: #33404b;
+  --accent: #4fb8c2; --accent-soft: #15343a; --gate: #e5a04f; --gate-soft: #3a2a17;
+  --ok: #6cc47a; --ok-soft: #1a3220; --plan: #9aa7b2; --plan-soft: #222b33; color-scheme: dark }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 15px; line-height: 1.45;
+  padding-inline: 16px; padding-block: 24px; }
+.sheet { max-width: 900px; margin: 0 auto 24px; background: var(--sheet); border: 1px solid var(--line);
+  border-radius: 6px; padding: 28px clamp(16px, 4vw, 40px); display: grid; gap: 22px; }
+h1, h2 { font-family: var(--display); text-wrap: balance; margin: 0; }
+h1 { font-size: 2rem; font-weight: 800; letter-spacing: -0.01em; }
+h2 { font-size: 1.1rem; font-weight: 700; display: flex; gap: 10px; align-items: baseline; }
+h2 .tag { font-family: var(--mono); font-size: 0.72rem; color: var(--accent); letter-spacing: 0.06em; text-transform: uppercase; }
+.kicker { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; max-width: 62ch; margin: 6px 0 0; }
+.lede b { color: var(--accent); }
+.cap { color: var(--muted); font-size: 0.9rem; margin: 6px 0 0; max-width: 70ch; }
+section { display: grid; gap: 8px; min-width: 0; }
+.fig { overflow-x: auto; }
+.fig svg { display: block; width: 100%; min-width: 640px; height: auto; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+@media (min-width: 760px) { .stats { grid-template-columns: repeat(5, 1fr); } }
+.stat { border-top: 3px solid var(--accent); background: var(--accent-soft); padding: 10px 12px; border-radius: 0 0 4px 4px; }
+.stat b { display: block; font-family: var(--display); font-size: 1.5rem; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 0.85rem; color: var(--muted); }
+
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 22px; }
+ul.tight { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+ul.tight li::marker { color: var(--accent); }
+.foot { font-size: 0.8rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 10px; }
+
+/* SVG roles, all from tokens */
+svg text { font-family: var(--body); fill: var(--ink); }
+svg .t-title { font-family: var(--display); font-weight: 700; font-size: 15px; }
+svg .t-small { font-size: 12px; fill: var(--muted); }
+svg .t-mono { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+svg .t-on { fill: var(--accent); font-weight: 600; }
+svg .box { fill: var(--sheet); stroke: var(--line); stroke-width: 1.5; }
+svg .core { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; }
+svg .stage { fill: var(--sheet); stroke: var(--accent); stroke-width: 1.5; }
+svg .gate { fill: var(--gate-soft); stroke: var(--gate); stroke-width: 2; }
+svg .gate-t { fill: var(--gate); font-weight: 700; }
+svg .okbox { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.5; }
+svg .planbox { fill: var(--plan-soft); stroke: var(--plan); stroke-width: 1.5; stroke-dasharray: 5 4; }
+svg .arrow { stroke: var(--accent); stroke-width: 2; fill: none; }
+svg .arrow-m { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+svg .arrow-g { stroke: var(--gate); stroke-width: 1.5; fill: none; stroke-dasharray: 4 3; }
+svg .head { fill: var(--accent); }
+svg .head-m { fill: var(--muted); }
+svg .head-g { fill: var(--gate); }
+svg .bar-done { fill: var(--ok); }
+svg .bar-part { fill: var(--accent); }
+svg .bar-exp { fill: var(--gate); }
+svg .bar-todo { fill: var(--plan-soft); stroke: var(--plan); stroke-width: 1; stroke-dasharray: 4 3; }
+
+@page { size: A4; margin: 10mm; }
+@media print {
+  body { padding: 0; background: var(--sheet); font-size: 12.5px; }
+  .sheet { border: 0; padding: 0; margin: 0; max-width: none; gap: 14px; break-after: page; }
+  .sheet:last-child { break-after: auto; }
+  .fig svg { min-width: 0; }
+  .stats { grid-template-columns: repeat(5, 1fr); }
+  h1 { font-size: 1.7rem; }
+}
+</style>
+</head>
+<body>
+
+<!-- ============ PAGE 1 ============ -->
+<div class="sheet">
+  <header>
+    <div class="kicker">Program overview · for leadership</div>
+    <h1>EdgeForge</h1>
+    <p class="lede">Turns a trained <b>AI model</b> into <b>ready-to-run code for small, low-cost chips</b>, and checks that the chip version gives the same answers as the original.</p>
+  </header>
+
+  <section>
+    <h2><span class="tag">The big picture</span> What goes in, what comes out</h2>
+    <div class="fig">
+    <svg viewBox="0 0 860 275" role="img" aria-label="Inputs flow into EdgeForge, which outputs chip code, firmware and FPGA designs">
+      <defs>
+        <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="head" d="M0,0L10,5L0,10z"/></marker>
+      </defs>
+      <!-- inputs -->
+      <text x="20" y="22" class="t-mono">INPUT</text>
+      <rect class="box" x="20" y="34" width="190" height="72" rx="6"/>
+      <text x="36" y="62" class="t-title">Your data</text>
+      <text x="36" y="84" class="t-small">a spreadsheet (CSV) of</text>
+      <text x="36" y="99" class="t-small">sensor readings</text>
+      <text x="115" y="132" class="t-small" text-anchor="middle">or</text>
+      <rect class="box" x="20" y="150" width="190" height="88" rx="6"/>
+      <text x="36" y="178" class="t-title">A trained model</text>
+      <text x="36" y="200" class="t-small">from common AI tools</text>
+      <text x="36" y="222" class="t-mono">sklearn · Keras · ONNX</text>
+
+      <path class="arrow" d="M210,70 L280,140" marker-end="url(#a)"/>
+      <path class="arrow" d="M210,194 L280,160" marker-end="url(#a)"/>
+
+      <!-- core -->
+      <rect class="core" x="285" y="40" width="270" height="220" rx="10"/>
+      <text x="420" y="72" class="t-title" text-anchor="middle" style="font-size:18px">EdgeForge</text>
+      <text x="420" y="92" class="t-small" text-anchor="middle">web page or command line</text>
+      <g>
+        <rect class="stage" x="310" y="108" width="220" height="28" rx="4"/><text x="420" y="127" text-anchor="middle" font-size="13">1 · Train (optional)</text>
+        <rect class="stage" x="310" y="142" width="220" height="28" rx="4"/><text x="420" y="161" text-anchor="middle" font-size="13">2 · Check it fits the chip</text>
+        <rect class="stage" x="310" y="176" width="220" height="28" rx="4"/><text x="420" y="195" text-anchor="middle" font-size="13">3 · Generate chip code</text>
+        <rect class="gate" x="310" y="210" width="220" height="28" rx="4"/><text x="420" y="229" text-anchor="middle" font-size="13" class="gate-t">4 · Verify answers match</text>
+      </g>
+
+      <path class="arrow" d="M555,110 L620,64" marker-end="url(#a)"/>
+      <path class="arrow" d="M555,150 L620,150" marker-end="url(#a)"/>
+      <path class="arrow" d="M555,190 L620,236" marker-end="url(#a)"/>
+
+      <!-- outputs -->
+      <text x="625" y="22" class="t-mono">OUTPUT</text>
+      <rect class="okbox" x="625" y="34" width="215" height="64" rx="6"/>
+      <text x="640" y="60" class="t-title">Microcontroller code</text>
+      <text x="640" y="82" class="t-small">C source + firmware image</text>
+      <rect class="okbox" x="625" y="118" width="215" height="64" rx="6"/>
+      <text x="640" y="144" class="t-title">Arduino sketch</text>
+      <text x="640" y="166" class="t-small">for hobby / prototype boards</text>
+      <rect class="box" x="625" y="202" width="215" height="64" rx="6"/>
+      <text x="640" y="228" class="t-title">FPGA hardware design</text>
+      <text x="640" y="250" class="t-small">experimental</text>
+    </svg>
+    </div>
+    <p class="cap">No hand-written embedded code. One tool covers the whole path from data to a device-ready build.</p>
+  </section>
+
+  <section>
+    <h2><span class="tag">Why it matters</span> The value in one line each</h2>
+    <div class="two">
+      <ul class="tight">
+        <li><b>Cheaper hardware:</b> AI runs on chips costing a few dollars, no cloud or PC needed.</li>
+        <li><b>Faster delivery:</b> minutes from model to buildable code instead of weeks of manual porting.</li>
+      </ul>
+      <ul class="tight">
+        <li><b>Built-in trust:</b> every build is checked against the original model before it is handed over.</li>
+        <li><b>Usable by non-experts:</b> a point-and-click web page alongside the engineer's command line.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="tag">At a glance</span> Today's reach</h2>
+    <div class="stats">
+      <div class="stat"><b>3</b><span>AI model formats accepted</span></div>
+      <div class="stat"><b>5</b><span>chip profiles, 8-bit to 32-bit</span></div>
+      <div class="stat"><b>256 B</b><span>RAM on the smallest supported chip</span></div>
+      <div class="stat"><b>3</b><span>output families: MCU, Arduino, FPGA</span></div>
+      <div class="stat"><b>117</b><span>automated tests guarding quality</span></div>
+    </div>
+  </section>
+</div>
+
+<!-- ============ PAGE 2 ============ -->
+<div class="sheet">
+  <section>
+    <h2><span class="tag">How it works</span> One pipeline, two safety gates</h2>
+    <div class="fig">
+    <svg viewBox="0 0 860 210" role="img" aria-label="Pipeline: read model, size check gate, generate code, build, golden check gate, deliver">
+      <defs>
+        <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="head" d="M0,0L10,5L0,10z"/></marker>
+        <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="head-g" d="M0,0L10,5L0,10z"/></marker>
+      </defs>
+      <!-- stages -->
+      <rect class="stage" x="10" y="40" width="120" height="70" rx="6"/>
+      <text x="70" y="70" text-anchor="middle" class="t-title">Read</text>
+      <text x="70" y="92" text-anchor="middle" class="t-small">understand model</text>
+
+      <rect class="gate" x="160" y="40" width="120" height="70" rx="6"/>
+      <text x="220" y="70" text-anchor="middle" class="t-title gate-t">Size check</text>
+      <text x="220" y="92" text-anchor="middle" class="t-small">fits memory?</text>
+
+      <rect class="stage" x="310" y="40" width="120" height="70" rx="6"/>
+      <text x="370" y="70" text-anchor="middle" class="t-title">Generate</text>
+      <text x="370" y="92" text-anchor="middle" class="t-small">chip-specific code</text>
+
+      <rect class="stage" x="460" y="40" width="120" height="70" rx="6"/>
+      <text x="520" y="70" text-anchor="middle" class="t-title">Build</text>
+      <text x="520" y="92" text-anchor="middle" class="t-small">firmware image</text>
+
+      <rect class="gate" x="610" y="40" width="120" height="70" rx="6"/>
+      <text x="670" y="70" text-anchor="middle" class="t-title gate-t">Golden check</text>
+      <text x="670" y="92" text-anchor="middle" class="t-small">same answers?</text>
+
+      <rect class="okbox" x="760" y="40" width="90" height="70" rx="6"/>
+      <text x="805" y="80" text-anchor="middle" class="t-title">Deliver</text>
+
+      <path class="arrow" d="M130,75 L158,75" marker-end="url(#b)"/>
+      <path class="arrow" d="M280,75 L308,75" marker-end="url(#b)"/>
+      <path class="arrow" d="M430,75 L458,75" marker-end="url(#b)"/>
+      <path class="arrow" d="M580,75 L608,75" marker-end="url(#b)"/>
+      <path class="arrow" d="M730,75 L758,75" marker-end="url(#b)"/>
+
+      <!-- reject paths -->
+      <path class="arrow-g" d="M220,110 L220,150" marker-end="url(#g)"/>
+      <text x="220" y="170" text-anchor="middle" class="t-small">Too big → stop early,</text>
+      <text x="220" y="186" text-anchor="middle" class="t-small">say by how much</text>
+      <path class="arrow-g" d="M670,110 L670,150" marker-end="url(#g)"/>
+      <text x="670" y="170" text-anchor="middle" class="t-small">Mismatch → fail loudly,</text>
+      <text x="670" y="186" text-anchor="middle" class="t-small">never ship silently</text>
+
+      <text x="10" y="22" class="t-mono">ORIGINAL MODEL</text>
+      <text x="850" y="22" class="t-mono" text-anchor="end">DEVICE-READY OUTPUT</text>
+    </svg>
+    </div>
+    <p class="cap">The golden check runs the same sample inputs through the original model and the generated chip code, and compares the answers.</p>
+  </section>
+
+  <section>
+    <h2><span class="tag">Design choice</span> New chip = one settings file, no new code</h2>
+    <div class="fig">
+    <svg viewBox="0 0 860 200" role="img" aria-label="Five chip profile files feed one shared code generator">
+      <defs>
+        <marker id="c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="head-m" d="M0,0L10,5L0,10z"/></marker>
+      </defs>
+      <text x="10" y="18" class="t-mono">CHIP PROFILES (settings files)</text>
+      <g>
+        <rect class="box" x="10" y="28" width="250" height="28" rx="4"/><text x="22" y="47" font-size="13">STM32F411 · 32-bit ARM</text>
+        <rect class="box" x="10" y="62" width="250" height="28" rx="4"/><text x="22" y="81" font-size="13">Generic Cortex-M4 · 32-bit ARM</text>
+        <rect class="box" x="10" y="96" width="250" height="28" rx="4"/><text x="22" y="115" font-size="13">ESP32 · 32-bit Xtensa</text>
+        <rect class="box" x="10" y="130" width="250" height="28" rx="4"/><text x="22" y="149" font-size="13">Arduino Nano 33 BLE Sense</text>
+        <rect class="box" x="10" y="164" width="250" height="28" rx="4"/><text x="22" y="183" font-size="13">8051 · 8-bit, 256 B RAM</text>
+      </g>
+      <path class="arrow-m" d="M260,42 C320,42 320,110 368,110"/>
+      <path class="arrow-m" d="M260,76 C320,76 320,110 368,110"/>
+      <path class="arrow-m" d="M260,110 L368,110"/>
+      <path class="arrow-m" d="M260,144 C320,144 320,110 368,110"/>
+      <path class="arrow-m" d="M260,178 C320,178 320,110 368,110" marker-end="url(#c)"/>
+
+      <rect class="core" x="372" y="62" width="200" height="96" rx="8"/>
+      <text x="472" y="100" text-anchor="middle" class="t-title">One shared</text>
+      <text x="472" y="120" text-anchor="middle" class="t-title">code generator</text>
+      <text x="472" y="142" text-anchor="middle" class="t-small">same logic for every chip</text>
+
+      <path class="arrow" d="M572,110 L620,110" marker-end="url(#b)"/>
+      <rect class="okbox" x="624" y="62" width="226" height="96" rx="8"/>
+      <text x="640" y="96" class="t-title">Correct code per chip</text>
+      <text x="640" y="118" class="t-small">memory layout, number sizes,</text>
+      <text x="640" y="134" class="t-small">compiler commands all come</text>
+      <text x="640" y="150" class="t-small">from the profile</text>
+    </svg>
+    </div>
+    <p class="cap">Adding hardware is a configuration task. This keeps the cost of supporting new customer chips low.</p>
+  </section>
+
+  <section>
+    <h2><span class="tag">Status</span> Where the program stands</h2>
+    <div class="fig">
+    <svg viewBox="0 0 860 190" role="img" aria-label="Phase status: phase 1 done, phase 2 partial, phase 3 experimental, phase 4 partial">
+      <g font-size="13">
+        <text x="10" y="32" class="t-title" style="font-size:13px">1 · Conversion engine</text>
+        <text x="10" y="48" class="t-small">microcontrollers, CLI</text>
+        <rect class="bar-done" x="250" y="20" width="460" height="22" rx="3"/>
+        <text x="720" y="36" class="t-small">Done</text>
+
+        <text x="10" y="76" class="t-title" style="font-size:13px">2 · Arduino support</text>
+        <text x="10" y="92" class="t-small">compile works, upload manual</text>
+        <rect class="bar-part" x="250" y="64" width="276" height="22" rx="3"/>
+        <rect class="bar-todo" x="526" y="64" width="184" height="22" rx="3"/>
+        <text x="720" y="80" class="t-small">Partial</text>
+
+        <text x="10" y="120" class="t-title" style="font-size:13px">3 · FPGA hardware</text>
+        <text x="10" y="136" class="t-small">verified in simulation</text>
+        <rect class="bar-exp" x="250" y="108" width="230" height="22" rx="3"/>
+        <rect class="bar-todo" x="480" y="108" width="230" height="22" rx="3"/>
+        <text x="720" y="124" class="t-small">Experimental</text>
+
+        <text x="10" y="164" class="t-title" style="font-size:13px">4 · Web platform</text>
+        <text x="10" y="180" class="t-small">local web page + training live</text>
+        <rect class="bar-part" x="250" y="152" width="184" height="22" rx="3"/>
+        <rect class="bar-todo" x="434" y="152" width="276" height="22" rx="3"/>
+        <text x="720" y="168" class="t-small">Partial</text>
+      </g>
+    </svg>
+    </div>
+    <p class="cap">Bars show relative progress, not a schedule. Dashed portion is remaining scope.</p>
+  </section>
+
+  <div class="two">
+    <section>
+      <h2><span class="tag">Next</span> Remaining scope</h2>
+      <ul class="tight">
+        <li>Hosted multi-user service: accounts, secure hosting.</li>
+        <li>One-click flashing to Arduino boards.</li>
+        <li>FPGA: real board pin-mapping and larger models.</li>
+      </ul>
+    </section>
+    <section>
+      <h2><span class="tag">Limits</span> What to know today</h2>
+      <ul class="tight">
+        <li>Small and mid-size models only; no large language or speech models.</li>
+        <li>Runs on one user's machine; not yet a shared service.</li>
+        <li>Device code is a demo wiring; real sensor drivers are added per product.</li>
+      </ul>
+    </section>
+  </div>
+
+  <p class="foot">EdgeForge · internal program overview · technical detail in README.md</p>
+</div>
+</body>
+</html>

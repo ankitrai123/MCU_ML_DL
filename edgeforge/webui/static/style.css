@@ -36,19 +36,6 @@ header p {
   margin: 0;
 }
 
-.brand-logo {
-  display: block;
-  max-width: 220px;
-  height: auto;
-  margin-bottom: 0.75rem;
-  /* The source logo has an opaque white background (no alpha channel) -- a white,
-     rounded-corner chip presents that deliberately on the dark theme instead of an
-     unstyled white rectangle. */
-  background: #ffffff;
-  padding: 0.5rem 0.75rem;
-  border-radius: 8px;
-}
-
 main {
   max-width: 860px;
   margin: 0 auto;
